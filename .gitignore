@@ -2,4 +2,7 @@
 .next-test/
 node_modules/
 node_modules_partial/
+.env
+.env.local
+.env.production
 npm-debug.log*
