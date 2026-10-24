@@ -1,0 +1,12 @@
+{
+  "/_global-error/page": "/_global-error",
+  "/_not-found/page": "/_not-found",
+  "/companies/[id]/page": "/companies/[id]",
+  "/dashboard/page": "/dashboard",
+  "/employees/page": "/employees",
+  "/login/page": "/login",
+  "/page": "/",
+  "/projects/page": "/projects",
+  "/reports/page": "/reports",
+  "/settings/page": "/settings"
+}

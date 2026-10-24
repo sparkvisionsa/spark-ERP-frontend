@@ -1,0 +1,5 @@
+.next/
+.next-test/
+node_modules/
+node_modules_partial/
+npm-debug.log*
