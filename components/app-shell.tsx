@@ -10,6 +10,8 @@ import {
 import { ReactNode, useEffect, useMemo, useState } from "react";
 import { Avatar } from "./ui";
 import { useAuth } from "./auth-provider";
+import { apiRequest } from "@/lib/api";
+import { companies } from "@/lib/data";
 
 const navItems = [
   { href: "/dashboard", label: "لوحة التحكم", description: "نظرة شاملة على الأعمال", icon: LayoutDashboard },
@@ -21,8 +23,9 @@ const navItems = [
 
 const companyItems = [
   { href: "/companies/spark", label: "سبارك فيجن", description: "التقييم والمعاينات", color: "#534AB7", icon: ClipboardCheck },
-  { href: "/companies/pro", label: "برو اوبشن", description: "اللوجستيات والتقنية", color: "#1D9E75", icon: Truck },
+  { href: "/companies/pro", label: "برو اوبشن", description: "اللوجستيات", color: "#1D9E75", icon: Truck },
 ];
+type ApiCompany = { key: string; name: string; logoUrl?: string; color?: string; departments?: Array<{ name: string }> };
 
 type SidebarMode = "expanded" | "collapsed" | "hidden";
 
@@ -32,7 +35,9 @@ export default function AppShell({ children, title, description, actions, compac
   const { user, loading: authLoading, logout } = useAuth();
   const [dark, setDark] = useState(false);
   const [mobile, setMobile] = useState(false);
-  const [companiesOpen, setCompaniesOpen] = useState(true);
+  // AppShell is recreated between page routes, so retain the companies list on company pages.
+  const [companiesOpen, setCompaniesOpen] = useState(() => pathname.startsWith("/companies"));
+  const [dynamicCompanies, setDynamicCompanies] = useState(companyItems);
   const [searchOpen, setSearchOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -68,7 +73,20 @@ export default function AppShell({ children, title, description, actions, compac
     return () => window.removeEventListener("keydown", key);
   }, [compact]);
 
-  useEffect(() => { setMobile(false); }, [pathname]);
+  useEffect(() => {
+    setMobile(false);
+    if (pathname.startsWith("/companies")) setCompaniesOpen(true);
+  }, [pathname]);
+  useEffect(() => {
+    if (!user) return;
+    void apiRequest<ApiCompany[]>("/companies")
+      .then((rows) => {
+        rows.forEach((company) => { companies[company.key] = { id: company.key, name: company.name, subtitle: "", color: company.color || "#7A2838", icon: "Building2" }; });
+        const links = rows.map((company) => ({ href: `/companies/${company.key}`, label: company.name, description: `${company.departments?.length || 0} أقسام`, color: company.color || "#7A2838", icon: Building2 }));
+        setDynamicCompanies(links);
+      })
+      .catch(() => undefined);
+  }, [user]);
   useEffect(() => {
     if (!mobile) return;
     const previous = document.body.style.overflow;
@@ -95,7 +113,7 @@ export default function AppShell({ children, title, description, actions, compac
   const hidden = sidebarMode === "hidden";
   const compactSidebar = collapsed && !mobile;
   const sidebarWidth = hidden ? "0px" : collapsed ? "76px" : "272px";
-  const allQuickLinks = useMemo(() => [...navItems, ...companyItems], []);
+  const allQuickLinks = useMemo(() => [...navItems, ...dynamicCompanies], [dynamicCompanies]);
   const visibleQuickLinks = allQuickLinks.filter((item) => `${item.label} ${item.description}`.includes(searchQuery.trim()));
   const roleLabel = user?.role === "SUPER_ADMIN" ? "مدير النظام" : user?.role === "SUPERVISOR" ? "مشرف" : "موظف";
 
@@ -121,8 +139,7 @@ export default function AppShell({ children, title, description, actions, compac
         {!compactSidebar && <SidebarLabel>مساحات العمل</SidebarLabel>}
         {compactSidebar ? <>
           <SidebarDivider />
-          <NavIconLink {...companyItems[0]} active={pathname === companyItems[0].href} />
-          <NavIconLink {...companyItems[1]} active={pathname.startsWith(companyItems[1].href)} />
+          {dynamicCompanies.map((company) => <NavIconLink key={company.href} {...company} active={pathname === company.href} />)}
         </> : <div className="sidebar-company-section">
           <button
             type="button"
@@ -137,7 +154,7 @@ export default function AppShell({ children, title, description, actions, compac
           </button>
           <div className={`sidebar-companies-grid ${companiesOpen ? "grid-rows-[1fr] opacity-100" : "pointer-events-none grid-rows-[0fr] opacity-0"}`}>
             <div className="min-h-0 overflow-hidden"><div className="sidebar-company-list">
-              {companyItems.map((company) => <CompanyLink key={company.href} {...company} active={pathname === company.href} />)}
+              {dynamicCompanies.map((company) => <CompanyLink key={company.href} {...company} active={pathname === company.href} />)}
             </div></div>
           </div>
         </div>}

@@ -1,10 +1,10 @@
-export type CompanyKey = "spark" | "pro";
+export type CompanyKey = string;
 export type EmployeeStatus = "نشط" | "في إجازة" | "غير نشط";
 
-export const companies = {
+export const companies: Record<string, { id: string; name: string; subtitle: string; color: string; icon: string }> = {
   spark: { id: "spark", name: "سبارك فيجن", subtitle: "تقييم ومعاينات", color: "#534AB7", icon: "ClipboardCheck" },
   pro: { id: "pro", name: "برو اوبشن", subtitle: "لوجستيات وتقنية", color: "#1D9E75", icon: "Truck" }
-} as const;
+};
 
 export type Employee = {
   id: string;

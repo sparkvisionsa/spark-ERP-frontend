@@ -11,7 +11,7 @@ export type CompanyAnalytics = {
   trend: Array<{ date: string; value: number }>;
 };
 export type AnalyticsProject = {
-  id: string; name: string; company: CompanyKey; client: string; dueDate: string; status: "ACTIVE" | "COMPLETED" | "ARCHIVED";
+  id: string; name: string; company: CompanyKey; client: string; dueDate?: string | null; status: "ACTIVE" | "COMPLETED" | "ARCHIVED";
   progress: number; totalTasks: number; completedTasks: number;
 };
 export type AttentionItem = {
