@@ -11,6 +11,7 @@ import {
   CalendarDays,
   Check,
   CheckCircle2,
+  ChevronDown,
   ChevronLeft,
   CircleStop,
   ClipboardList,
@@ -31,7 +32,9 @@ import {
   Mic,
   MoreHorizontal,
   Paperclip,
+  Pause,
   Pin,
+  Play,
   Plus,
   RotateCcw,
   Search,
@@ -48,6 +51,7 @@ import {
   FormEvent,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -55,7 +59,7 @@ import {
 import { createPortal } from "react-dom";
 
 type Role = "SUPER_ADMIN" | "SUPERVISOR" | "EMPLOYEE";
-type WorkStatus = "NOT_STARTED" | "IN_PROGRESS" | "COMPLETED";
+type WorkStatus = "NOT_STARTED" | "IN_PROGRESS" | "PAUSED" | "COMPLETED";
 type Priority = "NORMAL" | "IMPORTANT" | "URGENT";
 type ProjectStatus = "ACTIVE" | "COMPLETED" | "ARCHIVED";
 type ApiEmployee = {
@@ -78,6 +82,7 @@ type Organisation = {
 type ItemNode = {
   _id: string;
   text: string;
+  durationDays?: number | null;
   done: boolean;
   attachments: number;
   order: number;
@@ -85,8 +90,11 @@ type ItemNode = {
 type SubtaskNode = {
   _id: string;
   title: string;
+  durationDays?: number | null;
   manualStatus: WorkStatus;
   startedAt?: string | null;
+  startedById?: string | null;
+  elapsedSeconds?: number;
   order: number;
   items: ItemNode[];
   progress: number;
@@ -96,9 +104,11 @@ type SubtaskNode = {
 type TaskNode = {
   _id: string;
   title: string;
+  durationDays?: number | null;
   description: string;
   assigneeId: string;
   helperIds: string[];
+  receivedByIds?: string[];
   priority: Priority;
   dueDate?: string | null;
   manualStatus: WorkStatus;
@@ -131,6 +141,7 @@ type DeliveryNode = {
 type ApiProject = {
   _id: string;
   name: string;
+  durationDays?: number | null;
   company: CompanyKey;
   client?: string;
   description?: string;
@@ -147,9 +158,32 @@ type ApiProject = {
   tasks?: TaskNode[];
   deliveries?: DeliveryNode[];
 };
+type RunningWorkEntry = {
+  key: string;
+  kind: "task" | "detail";
+  projectId: string;
+  projectName: string;
+  employeeId: string;
+  employeeName: string;
+  taskId: string;
+  taskTitle: string;
+  detailId?: string;
+  detailTitle?: string;
+};
+type AssignedTaskEntry = {
+  key: string;
+  projectId: string;
+  projectName: string;
+  employeeId: string;
+  taskId: string;
+  taskTitle: string;
+  received: boolean;
+  status: WorkStatus;
+};
 type WorkspaceProject = {
   id: string;
   name: string;
+  durationDays: number | null;
   company: CompanyKey;
   client: string;
   description: string;
@@ -177,6 +211,7 @@ type ProjectDraft = Omit<
 >;
 type TaskDraft = {
   title: string;
+  durationDays: number | null;
   description: string;
   assigneeId: string;
   helperIds: string[];
@@ -187,9 +222,11 @@ type TaskDraft = {
 };
 type SubtaskDraft = {
   title: string;
+  durationDays: number | null;
   itemTexts: string[];
   manualStatus?: WorkStatus;
 };
+type ItemDraft = { text: string; durationDays: number | null };
 type ProjectSort = "manual" | "due" | "progress" | "name";
 type TaskFilter = "all" | "open" | "late" | Priority;
 type DragEntity = "project" | "member" | "task" | "subtask" | "item";
@@ -242,6 +279,7 @@ function toProject(item: ApiProject): WorkspaceProject {
   return {
     id: item._id,
     name: item.name,
+    durationDays: item.durationDays ?? null,
     company: item.company,
     client: item.client || "",
     description: item.description || "",
@@ -258,6 +296,53 @@ function toProject(item: ApiProject): WorkspaceProject {
     progress: item.progress || 0,
     totalTasks: item.totalTasks || 0,
   };
+}
+function collectRunningWork(
+  apiProjects: ApiProject[],
+  employeeNameFor: (employeeId: string) => string,
+): RunningWorkEntry[] {
+  return apiProjects.flatMap((project) =>
+    (project.tasks || []).flatMap((task) => {
+      const work: RunningWorkEntry[] = [];
+      for (const detail of task.subtasks || []) {
+        if (detail.manualStatus !== "IN_PROGRESS") continue;
+        const employeeId = detail.startedById || task.assigneeId;
+        work.push({
+          key: `${project._id}:detail:${detail._id}`,
+          kind: "detail",
+          projectId: project._id,
+          projectName: project.name,
+          employeeId,
+          employeeName: employeeNameFor(employeeId),
+          taskId: task._id,
+          taskTitle: task.title,
+          detailId: detail._id,
+          detailTitle: detail.title,
+        });
+      }
+      return work;
+    }),
+  );
+}
+function collectAssignedTasks(apiProjects: ApiProject[], employeeId?: string): AssignedTaskEntry[] {
+  if (!employeeId) return [];
+  return apiProjects.flatMap((project) =>
+    (project.tasks || [])
+      .filter((task) =>
+        (task.assigneeId === employeeId || task.helperIds?.includes(employeeId)) &&
+        task.manualStatus !== "COMPLETED" && task.progress < 100
+      )
+      .map((task) => ({
+        key: `${project._id}:${task._id}`,
+        projectId: project._id,
+        projectName: project.name,
+        employeeId,
+        taskId: task._id,
+        taskTitle: task.title,
+        received: Boolean(task.receivedByIds?.includes(employeeId)),
+        status: task.manualStatus,
+      })),
+  );
 }
 function shortDate(value?: string | null) {
   return value
@@ -286,6 +371,8 @@ export default function ProjectsPage() {
   const { user } = useAuth();
   const canManage = user?.role === "SUPER_ADMIN" || user?.role === "SUPERVISOR";
   const [projects, setProjects] = useState<WorkspaceProject[]>([]);
+  const [runningWork, setRunningWork] = useState<RunningWorkEntry[]>([]);
+  const [assignedTasks, setAssignedTasks] = useState<AssignedTaskEntry[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [workspace, setWorkspace] = useState<WorkspaceTree | null>(null);
   const [projectId, setProjectId] = useState("");
@@ -310,7 +397,8 @@ export default function ProjectsPage() {
   const [assignModal, setAssignModal] = useState(false);
   const [taskModal, setTaskModal] = useState(false);
   const [subtaskModal, setSubtaskModal] = useState(false);
-  const [addingSubtask, setAddingSubtask] = useState(false);
+  const [itemModal, setItemModal] = useState(false);
+  const [editingItem, setEditingItem] = useState<ItemNode | null>(null);
   const [editingProject, setEditingProject] = useState<WorkspaceProject | null>(
     null,
   );
@@ -318,8 +406,6 @@ export default function ProjectsPage() {
   const [editingSubtask, setEditingSubtask] = useState<SubtaskNode | null>(
     null,
   );
-  const [editingItemId, setEditingItemId] = useState("");
-  const [editingItemText, setEditingItemText] = useState("");
   const [dragged, setDragged] = useState<{ entity: DragEntity; id: string } | null>(null);
   const draggedRef = useRef<{ entity: DragEntity; id: string } | null>(null);
   const workspaceRequestRef = useRef(0);
@@ -331,6 +417,21 @@ export default function ProjectsPage() {
   function showError(caught: unknown, fallback: string) {
     setError(caught instanceof ApiError ? caught.message : fallback);
   }
+  const refreshRunningWork = useCallback(async () => {
+    try {
+      const active = await apiRequest<ApiProject[]>("/projects");
+      const employeeNames = new Map(employees.map((employee) => [employee.id, employee.name]));
+      for (const project of active) {
+        for (const member of project.members) {
+          if (typeof member !== "string") employeeNames.set(member._id, member.fullName || "");
+        }
+      }
+      setRunningWork(collectRunningWork(active, (id) => employeeNames.get(id) || ""));
+      setAssignedTasks(collectAssignedTasks(active, user?.role === "EMPLOYEE" ? user.id : undefined));
+    } catch {
+      // Keep the last known global status if a background refresh fails.
+    }
+  }, [employees, user?.id, user?.role]);
 
   const loadCatalog = useCallback(async (preferredId?: string) => {
     setLoading(true);
@@ -354,13 +455,20 @@ export default function ProjectsPage() {
       setCompanyKeys(organisations.map((entry) => entry.key));
       const nextProjects = [...active, ...archived].map(toProject);
       setProjects(nextProjects);
-      setEmployees(
-        employeeList
-          .filter(
-            (employee) => employee.role !== "SUPER_ADMIN" && employee.company,
-          )
-          .map(toEmployee),
-      );
+      const nextEmployees = employeeList
+        .filter(
+          (employee) => employee.role !== "SUPER_ADMIN" && employee.company,
+        )
+        .map(toEmployee);
+      const employeeNames = new Map(employeeList.map((employee) => [employee._id, employee.fullName || ""]));
+      for (const project of active) {
+        for (const member of project.members) {
+          if (typeof member !== "string") employeeNames.set(member._id, member.fullName || "");
+        }
+      }
+      setEmployees(nextEmployees);
+      setRunningWork(collectRunningWork(active, (id) => employeeNames.get(id) || ""));
+      setAssignedTasks(collectAssignedTasks(active, user?.role === "EMPLOYEE" ? user.id : undefined));
       const params = new URLSearchParams(window.location.search);
       const company = params.get("c");
       if (company && organisations.some((entry) => entry.key === company))
@@ -382,11 +490,19 @@ export default function ProjectsPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [user?.id, user?.role]);
 
   useEffect(() => {
     if (user) void loadCatalog();
   }, [user, loadCatalog]);
+
+  useEffect(() => {
+    if (!user) return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void refreshRunningWork();
+    }, 30_000);
+    return () => window.clearInterval(timer);
+  }, [user?.id, refreshRunningWork]);
 
   const applyWorkspace = useCallback(
     (tree: WorkspaceTree, useUrl = false) => {
@@ -396,10 +512,25 @@ export default function ProjectsPage() {
           project.id === tree._id ? toProject(tree) : project,
         ),
       );
+      const projectWork = collectRunningWork([tree], (id) =>
+        employees.find((employee) => employee.id === id)?.name ||
+        tree.members.find((member) => member._id === id)?.fullName ||
+        "",
+      );
+      setRunningWork((current) => [
+        ...current.filter((entry) => entry.projectId !== tree._id),
+        ...projectWork,
+      ]);
+      setAssignedTasks((current) => [
+        ...current.filter((entry) => entry.projectId !== tree._id),
+        ...collectAssignedTasks([tree], user?.role === "EMPLOYEE" ? user.id : undefined),
+      ]);
       const params = new URLSearchParams(window.location.search);
       const members = tree.members.map((member) => member._id);
       const nextEmployee =
-        (useUrl && members.includes(params.get("e") || "")
+        (user?.role === "EMPLOYEE"
+          ? members.includes(user.id) ? user.id : ""
+          : useUrl && members.includes(params.get("e") || "")
           ? params.get("e")
           : members.includes(employeeId)
             ? employeeId
@@ -430,7 +561,7 @@ export default function ProjectsPage() {
       setSubtaskId(nextSubtask?._id || "");
       setItemId(nextItem?._id || "");
     },
-    [employeeId, taskId, subtaskId, itemId],
+    [employeeId, taskId, subtaskId, itemId, employees, user?.id, user?.role],
   );
 
   const loadWorkspace = useCallback(
@@ -488,7 +619,7 @@ export default function ProjectsPage() {
   );
   const members = validWorkspaceMembers
     .map((member) => memberMap.get(member._id))
-    .filter((member): member is Employee => Boolean(member));
+    .filter((member): member is Employee => Boolean(member && (canManage || member.id === user?.id)));
   const employeeTasks =
     activeWorkspace?.tasks.filter(
       (task) =>
@@ -578,6 +709,7 @@ export default function ProjectsPage() {
       task &&
       (task.assigneeId === user.id || task.helperIds?.includes(user.id)),
     );
+  const receiptEmployeeId = user?.role === "EMPLOYEE" ? user.id : employeeId;
 
   function syncUrl(
     values: { p?: string; e?: string; t?: string; s?: string; i?: string },
@@ -655,6 +787,7 @@ export default function ProjectsPage() {
     syncUrl({ p: id });
   }
   function chooseEmployee(id: string) {
+    if (user?.role === "EMPLOYEE" && id !== user.id) return;
     const next = activeWorkspace?.tasks.find(
       (entry) => entry.assigneeId === id || entry.helperIds?.includes(id),
     );
@@ -662,15 +795,45 @@ export default function ProjectsPage() {
     setTaskId(next?._id || "");
     setSubtaskId(next?.subtasks[0]?._id || "");
     setItemId("");
-    setEditingItemId("");
     setLevel(2);
     syncUrl({ p: projectId, e: id, t: next?._id, s: next?.subtasks[0]?._id });
+  }
+  function navigateToRunningWork(
+    entry: RunningWorkEntry,
+    destination: "project" | "task" | "detail",
+  ) {
+    const nextLevel = destination === "project" ? 1 : destination === "task" ? 3 : 4;
+    setProjectId(entry.projectId);
+    setEmployeeId(entry.employeeId);
+    setTaskId(destination === "project" ? "" : entry.taskId);
+    setSubtaskId(destination === "detail" ? entry.detailId || "" : "");
+    setItemId("");
+    setLevel(nextLevel);
+    setTaskQuery("");
+    setTaskFilter("all");
+    localStorage.setItem("spark-last-project", entry.projectId);
+    const targetProject = projects.find((project) => project.id === entry.projectId);
+    const nextFilter = filter === "all" || filter === targetProject?.company
+      ? filter
+      : targetProject?.company || "all";
+    setFilter(nextFilter);
+    syncUrl({
+      p: entry.projectId,
+      e: entry.employeeId,
+      t: destination === "project" ? undefined : entry.taskId,
+      s: destination === "detail" ? entry.detailId : undefined,
+    }, nextFilter);
+    if (entry.projectId !== projectId) {
+      setWorkspaceLoading(true);
+      setWorkspace(null);
+    } else if (!activeWorkspace && !workspaceLoading) {
+      void loadWorkspace(entry.projectId, true);
+    }
   }
   function chooseTask(next: TaskNode) {
     setTaskId(next._id);
     setSubtaskId(next.subtasks[0]?._id || "");
     setItemId("");
-    setEditingItemId("");
     setLevel(3);
     syncUrl({
       p: projectId,
@@ -682,13 +845,11 @@ export default function ProjectsPage() {
   function chooseSubtask(next: SubtaskNode) {
     setSubtaskId(next._id);
     setItemId("");
-    setEditingItemId("");
     setLevel(4);
     syncUrl({ p: projectId, e: employeeId, t: taskId, s: next._id });
   }
   function chooseItem(id: string) {
     setItemId(id);
-    setEditingItemId("");
     setLevel(5);
     syncUrl({ p: projectId, e: employeeId, t: taskId, s: subtaskId, i: id });
   }
@@ -703,6 +864,7 @@ export default function ProjectsPage() {
       const body = {
         name: draft.name,
         company: draft.company,
+        durationDays: draft.durationDays,
         description: draft.description || undefined,
         startDate: draft.startDate || undefined,
         dueDate: draft.dueDate || null,
@@ -724,6 +886,27 @@ export default function ProjectsPage() {
       notify(wasEditing ? "تم تحديث المشروع" : "تم إنشاء المشروع");
     } catch (caught) {
       showError(caught, "تعذر حفظ المشروع");
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function quickAddProject(name: string) {
+    const company = filter !== "all" && filter !== "archive" && allowedCompanies.includes(filter)
+      ? filter
+      : allowedCompanies[0];
+    if (!company || busy) return;
+    setBusy(true);
+    try {
+      const result = await apiRequest<ApiProject>("/projects", {
+        method: "POST",
+        body: JSON.stringify({ name, company, memberIds: [] }),
+      });
+      await loadCatalog(result._id);
+      await loadWorkspace(result._id);
+      notify("تمت إضافة المشروع");
+    } catch (caught) {
+      showError(caught, "تعذر إضافة المشروع");
+      throw caught;
     } finally {
       setBusy(false);
     }
@@ -874,6 +1057,7 @@ export default function ProjectsPage() {
             helperIds: payload.helperIds,
             priority: payload.priority,
             dueDate: payload.dueDate || null,
+            durationDays: payload.durationDays,
             manualStatus: payload.manualStatus,
           }
         : {
@@ -892,6 +1076,40 @@ export default function ProjectsPage() {
       notify(wasEditing ? "تم تحديث المهمة" : "تمت إضافة المهمة");
     } catch (caught) {
       showError(caught, wasEditing ? "تعذر تحديث المهمة" : "تعذر إضافة المهمة");
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function quickAddTask(title: string) {
+    if (!project || !employeeId || busy) return;
+    setBusy(true);
+    try {
+      const existingIds = new Set(activeWorkspace?.tasks.map((entry) => entry._id) || []);
+      const tree = await apiRequest<WorkspaceTree>("/tasks", {
+        method: "POST",
+        body: JSON.stringify({
+          projectId: project.id,
+          title,
+          description: "",
+          assigneeId: employeeId,
+          helperIds: [],
+          priority: "NORMAL",
+          subtaskTitles: [],
+        }),
+      });
+      const createdTask = tree.tasks.find((entry) => !existingIds.has(entry._id));
+      applyWorkspace(tree);
+      if (createdTask) {
+        setTaskId(createdTask._id);
+        setSubtaskId(createdTask.subtasks[0]?._id || "");
+        setItemId("");
+        setLevel(3);
+        syncUrl({ p: project.id, e: employeeId, t: createdTask._id, s: createdTask.subtasks[0]?._id });
+      }
+      notify("تمت إضافة المهمة");
+    } catch (caught) {
+      showError(caught, "تعذر إضافة المهمة");
+      throw caught;
     } finally {
       setBusy(false);
     }
@@ -930,11 +1148,13 @@ export default function ProjectsPage() {
         ? {
             projectId: project.id,
             title: payload.title,
+            durationDays: payload.durationDays,
             manualStatus: payload.manualStatus,
           }
         : {
             projectId: project.id,
             title: payload.title,
+            durationDays: payload.durationDays,
             itemTexts: payload.itemTexts,
           };
       applyWorkspace(
@@ -943,6 +1163,7 @@ export default function ProjectsPage() {
           body: JSON.stringify(body),
         }),
       );
+      await refreshRunningWork();
       setSubtaskModal(false);
       setEditingSubtask(null);
       notify(wasEditing ? "تم تحديث التفاصيل" : "تمت إضافة المهمة الفرعية");
@@ -955,13 +1176,81 @@ export default function ProjectsPage() {
       setBusy(false);
     }
   }
+  async function quickAddSubtask(title: string) {
+    if (!project || !task || busy) return;
+    setBusy(true);
+    try {
+      const existingIds = new Set(task.subtasks.map((entry) => entry._id));
+      const tree = await apiRequest<WorkspaceTree>(`/subtasks/task/${task._id}`, {
+        method: "POST",
+        body: JSON.stringify({ projectId: project.id, title, itemTexts: [] }),
+      });
+      const updatedTask = tree.tasks.find((entry) => entry._id === task._id);
+      const createdSubtask = updatedTask?.subtasks.find((entry) => !existingIds.has(entry._id));
+      applyWorkspace(tree);
+      if (createdSubtask) {
+        setSubtaskId(createdSubtask._id);
+        setItemId("");
+        setLevel(4);
+        syncUrl({ p: project.id, e: employeeId, t: task._id, s: createdSubtask._id });
+      }
+      notify("تمت إضافة التفصيل");
+    } catch (caught) {
+      showError(caught, "تعذر إضافة التفصيل");
+      throw caught;
+    } finally {
+      setBusy(false);
+    }
+  }
   async function startSubtask(target: SubtaskNode) {
     if (!project || busy || target.manualStatus === "IN_PROGRESS") return;
     setBusy(true);
     try {
       applyWorkspace(await apiRequest<WorkspaceTree>(`/subtasks/${target._id}`, { method: "PATCH", body: JSON.stringify({ projectId: project.id, manualStatus: "IN_PROGRESS" }) }));
-      notify("بدأ توقيت المرحلة");
+      await refreshRunningWork();
+      notify("بدأت المرحلة، وتم إيقاف أي تفصيل آخر قيد العمل");
     } catch (caught) { showError(caught, "تعذر بدء المرحلة"); } finally { setBusy(false); }
+  }
+  async function pauseSubtask(target: SubtaskNode) {
+    if (!project || busy || target.manualStatus !== "IN_PROGRESS") return;
+    setBusy(true);
+    try {
+      applyWorkspace(await apiRequest<WorkspaceTree>(`/subtasks/${target._id}`, { method: "PATCH", body: JSON.stringify({ projectId: project.id, manualStatus: "PAUSED" }) }));
+      await refreshRunningWork();
+      notify("تم إيقاف المرحلة مؤقتًا");
+    } catch (caught) { showError(caught, "تعذر إيقاف المرحلة مؤقتًا"); } finally { setBusy(false); }
+  }
+  async function receiveTask(target: TaskNode) {
+    if (!project || busy || !user || target.receivedByIds?.includes(user.id)) return;
+    setBusy(true);
+    try {
+      applyWorkspace(await apiRequest<WorkspaceTree>(`/tasks/${target._id}/receive`, {
+        method: "POST",
+        body: JSON.stringify({ projectId: project.id }),
+      }));
+      notify("تم تسجيل استلام المهمة");
+    } catch (caught) {
+      showError(caught, "تعذر تسجيل استلام المهمة");
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function receiveAssignedTask(target: AssignedTaskEntry) {
+    if (busy || target.received || !user || user.role !== "EMPLOYEE") return;
+    setBusy(true);
+    try {
+      const tree = await apiRequest<WorkspaceTree>(`/tasks/${target.taskId}/receive`, {
+        method: "POST",
+        body: JSON.stringify({ projectId: target.projectId }),
+      });
+      if (target.projectId === projectId) applyWorkspace(tree);
+      setAssignedTasks((current) => current.map((entry) => entry.key === target.key ? { ...entry, received: true } : entry));
+      notify("تم استلام المهمة");
+    } catch (caught) {
+      showError(caught, "تعذر استلام المهمة");
+    } finally {
+      setBusy(false);
+    }
   }
   async function deleteSubtask(target: SubtaskNode) {
     if (
@@ -998,22 +1287,23 @@ export default function ProjectsPage() {
       showError(caught, "تعذر إضافة البند");
     }
   }
-  async function saveItem(target: ItemNode) {
-    const text = editingItemText.trim();
-    if (!project || !text || busy) return;
+  async function saveExecutionItem(payload: ItemDraft) {
+    if (!project || !subtask || busy) return;
+    const wasEditing = Boolean(editingItem);
     setBusy(true);
     try {
-      applyWorkspace(
-        await apiRequest<WorkspaceTree>(`/items/${target._id}`, {
-          method: "PATCH",
-          body: JSON.stringify({ projectId: project.id, text }),
-        }),
-      );
-      setEditingItemId("");
-      setEditingItemText("");
-      notify("تم تحديث بند التنفيذ");
+      const path = editingItem
+        ? `/items/${editingItem._id}`
+        : `/items/subtask/${subtask._id}`;
+      applyWorkspace(await apiRequest<WorkspaceTree>(path, {
+        method: editingItem ? "PATCH" : "POST",
+        body: JSON.stringify({ projectId: project.id, ...payload }),
+      }));
+      setItemModal(false);
+      setEditingItem(null);
+      notify(wasEditing ? "تم تحديث بند التنفيذ" : "تمت إضافة بند التنفيذ");
     } catch (caught) {
-      showError(caught, "تعذر تحديث البند");
+      showError(caught, wasEditing ? "تعذر تحديث بند التنفيذ" : "تعذر إضافة بند التنفيذ");
     } finally {
       setBusy(false);
     }
@@ -1033,8 +1323,7 @@ export default function ProjectsPage() {
           { method: "DELETE" },
         ),
       );
-      setEditingItemId("");
-      notify("تم حذف بند التنفيذ");
+        notify("تم حذف بند التنفيذ");
     } catch (caught) {
       showError(caught, "تعذر حذف البند");
     } finally {
@@ -1304,9 +1593,31 @@ export default function ProjectsPage() {
           </label>
         </div>
 
-        {project && (
-          <ProjectBrief project={project} />
-        )}
+        <div className={`mx-2 mt-1.5 grid min-w-0 gap-1.5 ${user?.role === "EMPLOYEE" ? "grid-cols-2" : "grid-cols-1"}`}>
+          {user?.role === "EMPLOYEE" && <AssignedTasksSummary
+            entries={assignedTasks}
+            loading={loading}
+            busy={busy}
+            onReceive={receiveAssignedTask}
+            onNavigate={(entry) => navigateToRunningWork({
+              key: entry.key,
+              kind: "task",
+              projectId: entry.projectId,
+              projectName: entry.projectName,
+              employeeId: entry.employeeId,
+              employeeName: user.fullName || "",
+              taskId: entry.taskId,
+              taskTitle: entry.taskTitle,
+            }, "task")}
+          />}
+          <RunningWorkSummary
+            entries={runningWork}
+            loading={loading}
+            onNavigate={navigateToRunningWork}
+          />
+        </div>
+
+        {project && <ProjectBrief project={project} />}
 
         {error && (
           <div
@@ -1329,6 +1640,7 @@ export default function ProjectsPage() {
           <div className="project-columns min-h-[560px] min-w-0 gap-1.5">
             <WorkspaceColumn
               index={1}
+              active={level === 0}
               title="المشاريع"
               count={visibleProjects.length}
               className={columnClass(0)}
@@ -1342,6 +1654,7 @@ export default function ProjectsPage() {
               }
             >
               <ColumnHead first="الاسم" second="الإنجاز" />
+              {canManage && allowedCompanies.length > 0 && <QuickAddInput placeholder="أضف مشروعًا سريعًا" busy={busy} onAdd={quickAddProject} />}
               {loading ? (
                 <LoadingRows />
               ) : visibleProjects.length ? (
@@ -1380,6 +1693,7 @@ export default function ProjectsPage() {
 
             <WorkspaceColumn
               index={2}
+              active={level === 1}
               title="الفريق"
               count={members.length}
               className={columnClass(1)}
@@ -1456,6 +1770,7 @@ export default function ProjectsPage() {
 
             <WorkspaceColumn
               index={3}
+              active={level === 2}
               title="المهام"
               count={visibleEmployeeTasks.length}
               className={columnClass(2)}
@@ -1474,6 +1789,7 @@ export default function ProjectsPage() {
                 onQuery={setTaskQuery}
                 onFilter={setTaskFilter}
               />
+              {canManage && project && employeeId && <QuickAddInput placeholder="أضف مهمة سريعة" busy={busy} onAdd={quickAddTask} />}
               {!project ? (
                 <ColumnEmpty
                   icon={<ClipboardList size={20} />}
@@ -1488,8 +1804,11 @@ export default function ProjectsPage() {
                     task={entry}
                     selected={task?._id === entry._id}
                     canManage={Boolean(canManage)}
+                    canReceive={Boolean(user?.role === "EMPLOYEE" && entry.progress < 100 && entry.manualStatus !== "COMPLETED" && (entry.assigneeId === user.id || entry.helperIds.includes(user.id)))}
+                    received={Boolean(receiptEmployeeId && entry.receivedByIds?.includes(receiptEmployeeId))}
                     busy={busy}
                     onSelect={() => chooseTask(entry)}
+                    onReceive={() => void receiveTask(entry)}
                     onEdit={() => {
                       setEditingTask(entry);
                       setTaskModal(true);
@@ -1515,28 +1834,21 @@ export default function ProjectsPage() {
 
             <WorkspaceColumn
               index={4}
+              active={level === 3}
               title="التفاصيل"
               count={task?.subtasks.length || 0}
               className={columnClass(3)}
               onAdd={
                 canManage && task
                   ? () => {
-                      setAddingSubtask(true);
+                      setEditingSubtask(null);
+                      setSubtaskModal(true);
                     }
                   : undefined
               }
             >
               <ColumnHead first="المهمة الفرعية" second="البنود" />
-              {addingSubtask && task && (
-                <InlineStageForm
-                  busy={busy}
-                  onCancel={() => setAddingSubtask(false)}
-                  onSave={async (payload) => {
-                    await saveSubtask(payload);
-                    setAddingSubtask(false);
-                  }}
-                />
-              )}
+              {canManage && task && <QuickAddInput placeholder="اسم مرحلة جديدة" busy={busy} onAdd={quickAddSubtask} />}
               {!task ? (
                 <ColumnEmpty
                   icon={<ClipboardList size={20} />}
@@ -1550,6 +1862,7 @@ export default function ProjectsPage() {
                     selected={subtask?._id === entry._id}
                     canManage={Boolean(canManage)}
                     canWork={canWorkOnTask}
+                    canPause={Boolean(canManage || (user && (entry.startedById === user.id || (!entry.startedById && task.assigneeId === user.id))))}
                     busy={busy}
                     onSelect={() => chooseSubtask(entry)}
                     onEdit={() => {
@@ -1557,6 +1870,7 @@ export default function ProjectsPage() {
                       setSubtaskModal(true);
                     }}
                     onStart={() => void startSubtask(entry)}
+                    onPause={() => void pauseSubtask(entry)}
                     onDelete={() => void deleteSubtask(entry)}
                     dragging={dragged?.entity === "subtask" && dragged.id === entry._id}
                     onDragStart={(event) => beginDrag(event, "subtask", entry._id)}
@@ -1574,9 +1888,11 @@ export default function ProjectsPage() {
 
             <WorkspaceColumn
               index={5}
+              active={level === 4}
               title="قائمة التنفيذ"
               count={subtask?.items.length || 0}
               className={columnClass(4)}
+              onAdd={canWorkOnTask && subtask ? () => { setEditingItem(null); setItemModal(true); } : undefined}
             >
               {subtask ? (
                 <>
@@ -1635,38 +1951,16 @@ export default function ProjectsPage() {
                       >
                         {entry.done && <Check size={12} strokeWidth={3} />}
                       </button>
-                      {editingItemId === entry._id ? (
-                        <input
-                          autoFocus
-                          className="field h-7 min-w-0 flex-1 px-2 text-[10px]"
-                          value={editingItemText}
-                          onChange={(event) =>
-                            setEditingItemText(event.target.value)
-                          }
-                          onKeyDown={(event) => {
-                            if (event.key === "Enter") void saveItem(entry);
-                            if (event.key === "Escape") setEditingItemId("");
-                          }}
-                          onBlur={() => {
-                            if (
-                              editingItemText.trim() &&
-                              editingItemText.trim() !== entry.text
-                            )
-                              void saveItem(entry);
-                            else setEditingItemId("");
-                          }}
+                      <button
+                        onClick={() => chooseItem(entry._id)}
+                        className={`min-w-0 flex-1 text-start text-xs ${entry.done ? "line-through opacity-60" : ""}`}
+                      >
+                        <FullNameTooltip
+                          text={entry.text}
+                          className="block truncate"
                         />
-                      ) : (
-                        <button
-                          onClick={() => chooseItem(entry._id)}
-                          className={`min-w-0 flex-1 text-start text-xs ${entry.done ? "line-through opacity-60" : ""}`}
-                        >
-                          <FullNameTooltip
-                            text={entry.text}
-                            className="block truncate"
-                          />
-                        </button>
-                      )}
+                      </button>
+                      {entry.durationDays ? <span className="shrink-0 text-[9px]" style={{ color: "var(--muted)" }}>{entry.durationDays} أيام</span> : null}
                       {entry.attachments > 0 && (
                         <span
                           className="flex items-center gap-0.5 text-[10px]"
@@ -1676,14 +1970,14 @@ export default function ProjectsPage() {
                           {entry.attachments}
                         </span>
                       )}
-                      {canManage && editingItemId !== entry._id && (
+                      {canManage && (
                         <span className="hidden shrink-0 gap-0.5 group-hover:flex">
                           <button
                             className="btn-ghost h-6 w-6"
                             title="تعديل البند"
                             onClick={() => {
-                              setEditingItemId(entry._id);
-                              setEditingItemText(entry.text);
+                              setEditingItem(entry);
+                              setItemModal(true);
                             }}
                           >
                             <Edit3 size={11} />
@@ -1715,6 +2009,7 @@ export default function ProjectsPage() {
 
             <WorkspaceColumn
               index={6}
+              active={level === 5}
               title="الإنجاز والتسليمات"
               count={selectedDeliveries.length}
               className={columnClass(5)}
@@ -1796,6 +2091,16 @@ export default function ProjectsPage() {
           onSave={saveSubtask}
         />
       )}
+      {canWorkOnTask && subtask && (
+        <ExecutionItemModal
+          open={itemModal}
+          onClose={() => { if (!busy) { setItemModal(false); setEditingItem(null); } }}
+          item={editingItem}
+          subtaskTitle={subtask.title}
+          busy={busy}
+          onSave={saveExecutionItem}
+        />
+      )}
       <Toast show={Boolean(toast)} message={toast} />
     </AppShell>
   );
@@ -1803,86 +2108,71 @@ export default function ProjectsPage() {
 
 function FullNameTooltip({ text, className = "" }: { text: string; className?: string }) {
   const anchorRef = useRef<HTMLSpanElement>(null);
-  const showTimerRef = useRef<number | null>(null);
-  const [position, setPosition] = useState<{
-    left: number;
-    top: number;
-    placement: "top" | "bottom";
-  } | null>(null);
+  const tooltipRef = useRef<HTMLSpanElement>(null);
+  const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState({ left: 8, top: 8 });
 
-  const hide = useCallback(() => {
-    if (showTimerRef.current !== null) window.clearTimeout(showTimerRef.current);
-    showTimerRef.current = null;
-    setPosition(null);
+  const updatePosition = useCallback(() => {
+    const anchor = anchorRef.current;
+    const tooltip = tooltipRef.current;
+    if (!anchor || !tooltip) return;
+    const anchorRect = anchor.getBoundingClientRect();
+    const tooltipRect = tooltip.getBoundingClientRect();
+    const margin = 8;
+    const gap = 4;
+    const leftCandidate = anchorRect.left - tooltipRect.width - gap;
+    const fitsLeft = leftCandidate >= margin;
+    const left = fitsLeft
+      ? leftCandidate
+      : Math.max(margin, Math.min(anchorRect.right + gap, window.innerWidth - tooltipRect.width - margin));
+    const top = fitsLeft
+      ? Math.max(margin, Math.min(anchorRect.top + (anchorRect.height - tooltipRect.height) / 2, window.innerHeight - tooltipRect.height - margin))
+      : anchorRect.bottom + tooltipRect.height + gap <= window.innerHeight - margin
+        ? anchorRect.bottom + gap
+        : Math.max(margin, anchorRect.top - tooltipRect.height - gap);
+    setPosition({ left, top });
   }, []);
 
-  const place = useCallback(() => {
+  useLayoutEffect(() => {
+    if (!open) return;
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+    };
+  }, [open, updatePosition]);
+
+  const show = () => {
     const anchor = anchorRef.current;
     if (!anchor) return;
-    const rect = anchor.getBoundingClientRect();
-    const placement = rect.bottom + 100 < window.innerHeight ? "bottom" : "top";
-    setPosition({
-      left: Math.min(Math.max(rect.left + rect.width / 2, 170), window.innerWidth - 170),
-      top: placement === "bottom" ? rect.bottom + 10 : rect.top - 10,
-      placement,
-    });
-  }, []);
-
-  const scheduleShow = useCallback(() => {
-    if (showTimerRef.current !== null) window.clearTimeout(showTimerRef.current);
-    showTimerRef.current = window.setTimeout(() => {
-      showTimerRef.current = null;
-      place();
-    }, 180);
-  }, [place]);
-
-  useEffect(() => {
-    if (!position) return;
-    const handleViewportChange = () => hide();
-    window.addEventListener("scroll", handleViewportChange, true);
-    window.addEventListener("resize", handleViewportChange);
-    return () => {
-      window.removeEventListener("scroll", handleViewportChange, true);
-      window.removeEventListener("resize", handleViewportChange);
-    };
-  }, [position, hide]);
-
-  useEffect(() => {
-    const anchor = anchorRef.current;
-    const focusTarget = anchor?.closest<HTMLElement>("button, a, [tabindex]");
-    if (!focusTarget) return;
-    focusTarget.addEventListener("focus", scheduleShow);
-    focusTarget.addEventListener("blur", hide);
-    return () => {
-      focusTarget.removeEventListener("focus", scheduleShow);
-      focusTarget.removeEventListener("blur", hide);
-    };
-  }, [scheduleShow, hide]);
-
-  useEffect(() => () => {
-    if (showTimerRef.current !== null) window.clearTimeout(showTimerRef.current);
-  }, []);
+    const isClipped = anchor.scrollWidth > anchor.clientWidth + 1 || anchor.scrollHeight > anchor.clientHeight + 1;
+    if (!isClipped) return;
+    setOpen(true);
+  };
 
   return (
     <>
       <span
         ref={anchorRef}
         className={`full-name-anchor ${className}`}
-        onMouseEnter={scheduleShow}
-        onMouseLeave={hide}
+        onMouseEnter={show}
+        onMouseLeave={() => setOpen(false)}
+        onFocus={show}
+        onBlur={() => setOpen(false)}
       >
         {text}
       </span>
-      {position && createPortal(
+      {open && typeof document !== "undefined" && createPortal(
         <span
+          ref={tooltipRef}
+          className="full-name-tooltip"
           role="tooltip"
           dir="rtl"
-          className="full-name-tooltip"
-          data-placement={position.placement}
           style={{ left: position.left, top: position.top }}
         >
-          <Sparkles size={13} aria-hidden="true" />
-          <span>{text}</span>
+          {text}
         </span>,
         document.body,
       )}
@@ -1894,7 +2184,7 @@ function ProjectBrief({ project }: { project: WorkspaceProject }) {
   const overdue = isOverdue(project.dueDate, project.progress);
   return (
     <section
-      className="mx-2 mt-1.5 flex min-h-10 flex-wrap items-center gap-2 rounded-lg border px-2 py-1.5"
+      className="mx-2 mt-1 flex min-h-9 flex-wrap items-center gap-x-1.5 gap-y-1 rounded-lg border px-1.5 py-1"
       style={{
         borderColor: overdue
           ? "color-mix(in srgb, var(--danger) 35%, var(--border))"
@@ -1906,7 +2196,7 @@ function ProjectBrief({ project }: { project: WorkspaceProject }) {
         className="h-2 w-2 shrink-0 rounded-full"
         style={{ background: companyMeta(project.company).color }}
       />
-      <h3 className="min-w-[120px] flex-1 truncate text-xs font-medium">
+      <h3 className="min-w-[120px] flex-1 text-xs font-medium">
         <FullNameTooltip text={project.name} className="block truncate" />
       </h3>
       <span
@@ -1933,8 +2223,126 @@ function ProjectBrief({ project }: { project: WorkspaceProject }) {
         <CalendarDays size={11} />
         {project.dueDate ? shortDate(project.dueDate) : "بدون موعد"} ·{" "}
         {project.memberIds.length} موظفين
+        {project.durationDays ? <> · المدة {project.durationDays} يوم</> : null}
       </span>
     </section>
+  );
+}
+
+function AssignedTasksSummary({
+  entries,
+  loading,
+  busy,
+  onReceive,
+  onNavigate,
+}: {
+  entries: AssignedTaskEntry[];
+  loading: boolean;
+  busy: boolean;
+  onReceive: (entry: AssignedTaskEntry) => void;
+  onNavigate: (entry: AssignedTaskEntry) => void;
+}) {
+  const receivedCount = entries.filter((entry) => entry.received).length;
+  return (
+    <details className="group min-w-0 overflow-hidden rounded-lg border" style={{ borderColor: "var(--border)", background: "var(--surface)" }}>
+      <summary className="flex min-h-9 min-w-0 cursor-pointer list-none items-center gap-1 px-1.5 [&::-webkit-details-marker]:hidden sm:gap-1.5 sm:px-2">
+        <ClipboardList size={13} className="shrink-0" color="var(--primary)" />
+        <span className="min-w-0 truncate text-[9px] font-semibold sm:text-[11px]">المهام المستلمة</span>
+        <span className="ms-auto shrink-0 rounded-full px-1 py-0.5 text-[9px] font-medium sm:px-1.5" style={{ color: "var(--success)", background: "color-mix(in srgb, var(--success) 10%, var(--surface))" }}>
+          {receivedCount}/{entries.length}
+        </span>
+        <ChevronDown size={12} className="shrink-0 transition-transform group-open:rotate-180 sm:h-[13px] sm:w-[13px]" color="var(--muted)" />
+      </summary>
+      {entries.length ? (
+        <div className="grid max-h-36 min-w-0 grid-cols-1 gap-1 border-t p-1.5 lg:grid-cols-2" style={{ borderColor: "var(--border)" }}>
+          {entries.map((entry) => (
+            <div key={entry.key} className="flex min-w-0 items-center gap-2 rounded-lg border px-2 py-1.5" style={{ borderColor: "var(--border)", background: "var(--surface-2)" }}>
+              <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: entry.received ? "var(--success)" : "var(--warning)" }} />
+              <div className="min-w-0 flex-1">
+                <button type="button" onClick={() => onNavigate(entry)} className="block w-full truncate text-start text-[11px] font-medium hover:text-brand" aria-label={`فتح المهمة ${entry.taskTitle} في مشروع ${entry.projectName}`}>
+                  <FullNameTooltip text={entry.taskTitle} className="block truncate" />
+                </button>
+                <button type="button" onClick={() => onNavigate(entry)} className="block w-full truncate text-start text-[9px] hover:text-brand" style={{ color: "var(--muted)" }}>
+                  <FullNameTooltip text={entry.projectName} className="block truncate" />
+                </button>
+              </div>
+              {entry.received ? (
+                <span className="flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-[9px] font-medium" style={{ color: "var(--success)", background: "color-mix(in srgb, var(--success) 10%, var(--surface))" }}><CheckCircle2 size={11} />تم الاستلام</span>
+              ) : (
+                <button type="button" className="btn h-7 shrink-0 gap-1 px-2 text-[10px]" disabled={busy} onClick={() => onReceive(entry)}><Check size={11} />استلام</button>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="flex items-center gap-1.5 border-t px-2 py-2 text-[10px]" style={{ color: "var(--muted)", background: "var(--surface-2)", borderColor: "var(--border)" }}>
+          {loading ? <Loader2 size={12} className="animate-spin" /> : <CheckCircle2 size={12} />}
+          {loading ? "جارٍ التحميل…" : "لا توجد مهام معيّنة لك"}
+        </div>
+      )}
+    </details>
+  );
+}
+
+function RunningWorkSummary({
+  entries,
+  loading,
+  onNavigate,
+}: {
+  entries: RunningWorkEntry[];
+  loading: boolean;
+  onNavigate: (entry: RunningWorkEntry, destination: "project" | "task" | "detail") => void;
+}) {
+  return (
+    <details className="group min-w-0 overflow-hidden rounded-lg border" style={{ borderColor: "var(--border)", background: "var(--surface)" }}>
+      <summary className="flex min-h-9 min-w-0 cursor-pointer list-none items-center gap-1 px-1.5 [&::-webkit-details-marker]:hidden sm:gap-1.5 sm:px-2">
+        <CircleStop size={13} className="shrink-0" color="var(--warning)" />
+        <span className="min-w-0 truncate text-[9px] font-semibold sm:text-[11px]">العمل الجاري الآن</span>
+        <span className="ms-auto shrink-0 rounded-full px-1 py-0.5 text-[9px] font-medium sm:px-1.5" style={{ color: "var(--warning)", background: "color-mix(in srgb, var(--warning) 12%, var(--surface))" }}>{entries.length}</span>
+        <ChevronDown size={12} className="shrink-0 transition-transform group-open:rotate-180 sm:h-[13px] sm:w-[13px]" color="var(--muted)" />
+      </summary>
+      {entries.length ? (
+        <div className="grid max-h-36 min-w-0 grid-cols-1 gap-1 border-t p-1.5 lg:grid-cols-2" style={{ borderColor: "var(--border)" }}>
+          {entries.map((entry) => (
+            <button
+              key={entry.key}
+              type="button"
+              onClick={() => onNavigate(entry, entry.detailId ? "detail" : "task")}
+              aria-label={`فتح التفصيلة الجارية ${entry.detailTitle || entry.taskTitle}`}
+              className="min-w-0 rounded-lg border px-2 py-1.5 text-start transition-colors hover:border-[var(--primary)] hover:bg-[var(--surface-3)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+              style={{ borderColor: "var(--border)", background: "var(--surface-2)" }}
+            >
+              <div className="mb-1 flex min-w-0 items-center gap-1.5">
+                <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[9px] font-semibold" style={{ color: "var(--primary)", background: "color-mix(in srgb, var(--primary) 12%, var(--surface))" }}>
+                  {(entry.employeeName || "م").trim().slice(0, 1)}
+                </span>
+                <span className="min-w-0 flex-1 truncate text-[10px] font-medium">{entry.employeeName || "موظف"}</span>
+                <span className="flex shrink-0 items-center gap-1 text-[9px]" style={{ color: "var(--warning)" }}><span className="h-1.5 w-1.5 animate-pulse rounded-full" style={{ background: "var(--warning)" }} />يعمل الآن</span>
+              </div>
+              <div className="flex min-w-0 items-center gap-1 text-[10px]">
+                <span className="min-w-0 max-w-[42%] truncate">
+                  <FullNameTooltip text={entry.projectName} className="block truncate" />
+                </span>
+                <ChevronLeft size={11} className="shrink-0" color="var(--muted)" />
+                <span className="min-w-0 flex-1 truncate font-medium">
+                  <FullNameTooltip text={entry.taskTitle} className="block truncate" />
+                </span>
+              </div>
+              {entry.detailId && entry.detailTitle ? (
+                <span className="mt-1 block w-full truncate text-[9px]" style={{ color: "var(--muted)" }}>
+                  <span className="me-1" aria-hidden="true">↳</span><FullNameTooltip text={entry.detailTitle} className="inline-block max-w-[90%] truncate align-bottom" />
+                </span>
+              ) : null}
+            </button>
+          ))}
+        </div>
+      ) : (
+        <div className="flex items-center gap-1.5 border-t px-2 py-2 text-[10px]" style={{ color: "var(--muted)", background: "var(--surface-2)", borderColor: "var(--border)" }}>
+          {loading ? <Loader2 size={12} className="animate-spin" /> : <CheckCircle2 size={12} />}
+          {loading ? "جارٍ التحميل…" : "لا يوجد عمل جارٍ"}
+        </div>
+      )}
+    </details>
   );
 }
 
@@ -1988,8 +2396,11 @@ function TaskRow({
   task,
   selected,
   canManage,
+  canReceive,
+  received,
   busy,
   onSelect,
+  onReceive,
   onEdit,
   onDelete,
   dragging,
@@ -2000,8 +2411,11 @@ function TaskRow({
   task: TaskNode;
   selected: boolean;
   canManage: boolean;
+  canReceive: boolean;
+  received: boolean;
   busy: boolean;
   onSelect: () => void;
+  onReceive: () => void;
   onEdit: () => void;
   onDelete: () => void;
   dragging: boolean;
@@ -2044,6 +2458,8 @@ function TaskRow({
             }}
           >
             {priorityLabel[task.priority]}
+            {received && <span className="flex items-center gap-0.5 font-medium" style={{ color: "var(--success)" }}><CheckCircle2 size={10} />تم الاستلام</span>}
+            {task.durationDays ? <><span>·</span><span>{task.durationDays} أيام</span></> : null}
             {overdue && (
               <>
                 <span>·</span>
@@ -2075,6 +2491,7 @@ function TaskRow({
           >
             {task.subtasks.length} تفاصيل · {task.helperIds.length + 1} مسؤولون
           </span>
+          {canReceive && !received && <button type="button" className="btn h-6 shrink-0 gap-1 px-2 text-[10px]" disabled={busy} onClick={onReceive}><Check size={11} />استلام</button>}
           {canManage && (
             <>
               <MiniButton label="تعديل المهمة" disabled={busy} onClick={onEdit}>
@@ -2101,10 +2518,12 @@ function SubtaskRow({
   selected,
   canManage,
   canWork,
+  canPause,
   busy,
   onSelect,
   onEdit,
   onStart,
+  onPause,
   onDelete,
   dragging,
   onDragStart,
@@ -2115,16 +2534,19 @@ function SubtaskRow({
   selected: boolean;
   canManage: boolean;
   canWork: boolean;
+  canPause: boolean;
   busy: boolean;
   onSelect: () => void;
   onEdit: () => void;
   onStart: () => void;
+  onPause: () => void;
   onDelete: () => void;
   dragging: boolean;
   onDragStart: (event: React.DragEvent<HTMLDivElement>) => void;
   onDragEnd: () => void;
   onDrop: (event: React.DragEvent<HTMLDivElement>) => void;
 }) {
+  const canResume = subtask.manualStatus === "PAUSED" || Boolean(subtask.elapsedSeconds);
   return (
     <div draggable={canManage} onDragStart={onDragStart} onDragEnd={onDragEnd} onDragOver={(event) => event.preventDefault()} onDrop={onDrop}
       className="border-b"
@@ -2147,6 +2569,7 @@ function SubtaskRow({
         {canManage && <GripVertical className="shrink-0 cursor-grab" size={14} color="var(--muted)" />}
         <span className="min-w-0 flex-1 text-xs font-medium leading-5">
           <FullNameTooltip text={subtask.title} className="block truncate" />
+          {subtask.durationDays ? <span className="mt-0.5 block text-[9px] font-normal" style={{ color: "var(--muted)" }}>{subtask.durationDays} أيام</span> : null}
           <Progress value={subtask.progress} className="mt-1" />
         </span>
         <span className="text-[10px]" style={{ color: "var(--muted)" }}>
@@ -2160,8 +2583,9 @@ function SubtaskRow({
             borderColor: "color-mix(in srgb, var(--primary) 15%, transparent)",
           }}
         >
-          {subtask.manualStatus !== "IN_PROGRESS" && subtask.progress < 100 && <button type="button" className="btn h-6 px-2 text-[10px]" disabled={busy} onClick={onStart}>بدء</button>}
-          {subtask.manualStatus === "IN_PROGRESS" && subtask.startedAt && <StageTimer startedAt={subtask.startedAt} />}
+          {subtask.manualStatus !== "IN_PROGRESS" && subtask.progress < 100 && <button type="button" className="btn h-6 gap-1 px-2 text-[10px]" disabled={busy} onClick={onStart}>{canResume ? <Play size={11} /> : null}{canResume ? "استئناف" : "بدء"}</button>}
+          {(subtask.manualStatus === "IN_PROGRESS" || subtask.manualStatus === "PAUSED" || Boolean(subtask.elapsedSeconds)) && <StageTimer startedAt={subtask.startedAt} elapsedSeconds={subtask.elapsedSeconds || 0} />}
+          {subtask.manualStatus === "IN_PROGRESS" && canPause && <button type="button" className="btn h-6 gap-1 px-2 text-[10px]" disabled={busy} onClick={onPause}><Pause size={11} />إيقاف مؤقت</button>}
           {canManage && <><MiniButton label="تعديل التفاصيل" disabled={busy} onClick={onEdit}><Edit3 size={11} /></MiniButton><MiniButton label="حذف التفاصيل" disabled={busy} danger onClick={onDelete}><Trash2 size={11} /></MiniButton></>}
         </div>
       )}
@@ -2169,13 +2593,12 @@ function SubtaskRow({
   );
 }
 
-function StageTimer({ startedAt }: { startedAt: string }) {
+function StageTimer({ startedAt, elapsedSeconds }: { startedAt?: string | null; elapsedSeconds: number }) {
   const [now, setNow] = useState(Date.now());
   useEffect(() => { const interval = window.setInterval(() => setNow(Date.now()), 1000); return () => window.clearInterval(interval); }, []);
-  const seconds = Math.max(0, Math.floor((now - new Date(startedAt).getTime()) / 1000));
+  const seconds = Math.max(0, elapsedSeconds + (startedAt ? Math.floor((now - new Date(startedAt).getTime()) / 1000) : 0));
   return <span className="flex items-center px-1 text-[10px] font-medium" style={{ color: "#7a2838" }} title="مدة العمل الحالية">{formatDuration(seconds)}</span>;
 }
-
 function MobileSteps({
   level,
   available,
@@ -2226,6 +2649,7 @@ function MobileSteps({
 }
 function WorkspaceColumn({
   index,
+  active,
   title,
   count,
   onAdd,
@@ -2233,6 +2657,7 @@ function WorkspaceColumn({
   children,
 }: {
   index: number;
+  active: boolean;
   title: string;
   count: number;
   onAdd?: () => void;
@@ -2241,23 +2666,23 @@ function WorkspaceColumn({
 }) {
   return (
     <article
-      className={`h-[calc(100dvh-154px)] min-h-[520px] min-w-0 flex-col overflow-hidden rounded-lg border md:h-[500px] md:min-h-0 lg:h-[540px] 2xl:h-[calc(100dvh-152px)] 2xl:min-h-[560px] ${className}`}
-      style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+      className={`h-[calc(100dvh-154px)] min-h-[520px] min-w-0 flex-col overflow-hidden rounded-lg border transition-colors md:h-[500px] md:min-h-0 lg:h-[540px] 2xl:h-[calc(100dvh-152px)] 2xl:min-h-[560px] ${className}`}
+      style={{ borderColor: active ? "color-mix(in srgb, var(--primary) 36%, var(--border))" : "var(--border)", background: "var(--surface)", boxShadow: active ? "0 0 0 1px color-mix(in srgb, var(--primary) 8%, transparent)" : "none" }}
     >
       <header
-        className="flex h-10 shrink-0 items-center border-b px-2"
-        style={{ borderColor: "var(--border)" }}
+        className="flex h-10 shrink-0 items-center gap-0.5 border-b px-2"
+        style={{ borderColor: "var(--border)", background: active ? "color-mix(in srgb, var(--primary) 4%, var(--surface))" : "var(--surface)" }}
       >
         <span
-          className="me-1.5 flex h-5 w-5 items-center justify-center rounded-full text-[10px] text-white"
-          style={{ background: "#7a2838" }}
+          className="me-1 flex h-5 w-5 items-center justify-center rounded-md text-[9px] font-semibold"
+          style={{ background: active ? "var(--primary)" : "var(--surface-3)", color: active ? "white" : "var(--muted)" }}
         >
           {index}
         </span>
-        <h3 className="min-w-0 truncate text-xs font-medium">{title}</h3>
+        <h3 className={`min-w-0 truncate text-xs ${active ? "font-semibold" : "font-medium"}`}>{title}</h3>
         <span
-          className="ms-1 shrink-0 text-[10px]"
-          style={{ color: "var(--muted)" }}
+          className="ms-1 shrink-0 rounded-full px-1.5 py-0.5 text-[9px]"
+          style={{ color: "var(--muted)", background: "var(--surface-2)" }}
         >
           {count}
         </span>
@@ -2382,10 +2807,12 @@ function ProjectRow({
             style={{ background: companyMeta(project.company).color }}
           />
           {canManage && <GripVertical className="shrink-0 cursor-grab" size={14} color="var(--muted)" />}
-          <FullNameTooltip
-            text={project.name}
-            className="min-w-0 flex-1 truncate text-xs font-medium"
-          />
+          <span className="min-w-0 flex-1">
+            <FullNameTooltip
+              text={project.name}
+              className="block truncate text-xs font-medium"
+            />
+          </span>
           {project.isPinned && <Pin size={11} fill="currentColor" style={{ color: "var(--primary)" }} />}
           {project.isFavorite && <Star size={11} fill="currentColor" style={{ color: "#BA7517" }} />}
           <Progress
@@ -2486,6 +2913,44 @@ function MiniButton({
 function ProjectAction({ label, icon, onClick }: { label: string; icon: React.ReactNode; onClick: () => void }) {
   return <button type="button" className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-right text-[10px] transition-colors hover:bg-[var(--workspace-active)]" onClick={onClick}><span className="shrink-0" style={{ color: "var(--workspace-active-strong)" }}>{icon}</span><span className="flex-1">{label}</span></button>;
 }
+function QuickAddInput({
+  placeholder,
+  busy,
+  onAdd,
+}: {
+  placeholder: string;
+  busy: boolean;
+  onAdd: (text: string) => Promise<void>;
+}) {
+  const [text, setText] = useState("");
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    const value = text.trim();
+    if (!value || busy) return;
+    try {
+      await onAdd(value);
+      setText("");
+    } catch {
+      // Keep the text available so the user can correct or retry it.
+    }
+  };
+  return (
+    <form onSubmit={(event) => void submit(event)} className="flex gap-1 border-b p-1.5" style={{ borderColor: "var(--border)", background: "var(--surface-2)" }}>
+      <input
+        className="field h-7 min-w-0 flex-1 px-2 text-[10px]"
+        value={text}
+        onChange={(event) => setText(event.target.value)}
+        placeholder={placeholder}
+        disabled={busy}
+      />
+      <button type="submit" className="btn-primary h-7 shrink-0 px-2 text-[9px]" disabled={busy || !text.trim()}>
+        {busy ? <Loader2 size={11} className="animate-spin" /> : <Plus size={11} />}
+        إضافة
+      </button>
+    </form>
+  );
+}
+
 function AddItem({ onAdd }: { onAdd: (text: string) => Promise<void> }) {
   const [text, setText] = useState("");
   const submit = async () => {
@@ -2797,9 +3262,10 @@ function DeliveryPanel({
         className="flex items-center gap-2 border-b px-2 py-1.5"
         style={{ borderColor: "var(--border)" }}
       >
-        <p className="min-w-0 flex-1 truncate text-xs font-medium">
-          {item?.text || "بند تنفيذ تلقائي عند الإرسال"}
-        </p>
+        <FullNameTooltip
+          text={item?.text || "بند تنفيذ تلقائي عند الإرسال"}
+          className="min-w-0 flex-1 truncate text-xs font-medium"
+        />
         <span
           className={`status shrink-0 ${task.derivedStatus === "COMPLETED" ? "status-success" : task.derivedStatus === "IN_PROGRESS" ? "status-warning" : "status-neutral"}`}
         >
@@ -3209,9 +3675,10 @@ function DeliveryCard({
         <Avatar name={authorName} color="#534AB7" size="sm" />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1">
-            <b className="min-w-0 flex-1 truncate text-[10px] font-medium">
-              {authorName}
-            </b>
+            <FullNameTooltip
+              text={authorName}
+              className="min-w-0 flex-1 truncate text-[10px] font-medium"
+            />
             <time
               className="shrink-0 text-[8px]"
               style={{ color: "var(--muted)" }}
@@ -3239,13 +3706,10 @@ function DeliveryCard({
           </div>
           {delivery.itemId && (
             <span
-              className="mt-0.5 inline-block max-w-full truncate rounded px-1.5 py-0.5 text-[8px]"
-              style={{
-                background: "var(--primary-soft)",
-                color: "var(--primary)",
-              }}
+              className="mt-0.5 inline-block max-w-full rounded px-1.5 py-0.5 text-[8px]"
+              style={{ background: "var(--primary-soft)", color: "var(--primary)" }}
             >
-              {itemName || "بند تنفيذ"}
+              <FullNameTooltip text={itemName || "بند تنفيذ"} className="block max-w-full truncate" />
             </span>
           )}
         </div>
@@ -3494,6 +3958,7 @@ function ProjectModal({
 }) {
   const [company, setCompany] = useState<CompanyKey>(allowedCompanies[0]);
   const [name, setName] = useState("");
+  const [durationDays, setDurationDays] = useState<number | null>(null);
   const [dueDate, setDueDate] = useState("");
   const [memberIds, setMemberIds] = useState<string[]>([]);
   const [description, setDescription] = useState("");
@@ -3503,6 +3968,7 @@ function ProjectModal({
     if (!open) return;
     setCompany(project?.company || allowedCompanies[0]);
     setName(project?.name || "");
+    setDurationDays(project?.durationDays ?? null);
     setDueDate(project?.dueDate || "");
     setMemberIds(project?.memberIds || []);
     setDescription(project?.description || "");
@@ -3532,6 +3998,7 @@ function ProjectModal({
     await onSave({
       name: name.trim(),
       company,
+      durationDays,
       client: "",
       dueDate,
       memberIds,
@@ -3618,6 +4085,18 @@ function ProjectModal({
               />
             </label>
           </div>
+          <label>
+            <span className="label">مدة المشروع بالأيام</span>
+            <input
+              className="field h-9"
+              type="number"
+              min={1}
+              step={1}
+              value={durationDays ?? ""}
+              onChange={(event) => setDurationDays(event.target.value ? Number(event.target.value) : null)}
+              placeholder="مثال: 30"
+            />
+          </label>
           <div>
             <div className="mb-2 flex items-center justify-between">
               <span className="label mb-0">فريق المشروع</span>
@@ -3838,6 +4317,7 @@ function TaskModal({
   const [helperIds, setHelperIds] = useState<string[]>([]);
   const [priority, setPriority] = useState<Priority>("NORMAL");
   const [dueDate, setDueDate] = useState("");
+  const [durationDays, setDurationDays] = useState<number | null>(null);
   const [subtasks, setSubtasks] = useState<string[]>([]);
   const [nextSubtask, setNextSubtask] = useState("");
   const [manualStatus, setManualStatus] = useState<WorkStatus>("NOT_STARTED");
@@ -3850,6 +4330,7 @@ function TaskModal({
       setHelperIds(task?.helperIds || []);
       setPriority(task?.priority || "NORMAL");
       setDueDate(task?.dueDate?.slice(0, 10) || "");
+      setDurationDays(task?.durationDays ?? null);
       setSubtasks([]);
       setNextSubtask("");
       setManualStatus(task?.manualStatus || "NOT_STARTED");
@@ -3878,6 +4359,7 @@ function TaskModal({
     }
     await onSave({
       title: title.trim(),
+      durationDays,
       description: description.trim(),
       assigneeId,
       helperIds: helperIds.filter((id) => id !== assigneeId),
@@ -3981,6 +4463,11 @@ function TaskModal({
               onChange={(event) => setDescription(event.target.value)}
               placeholder="اشرح المطلوب والنتيجة التي تعني أن المهمة اكتملت…"
             />
+          </label>
+
+          <label>
+            <span className="label">مدة المهمة بالأيام</span>
+            <input className="field" type="number" min={1} step={1} value={durationDays ?? ""} onChange={(event) => setDurationDays(event.target.value ? Number(event.target.value) : null)} placeholder="مثال: 5" />
           </label>
           <div className="grid gap-3 sm:grid-cols-2">
             <label>
@@ -4152,14 +4639,57 @@ function TaskModal({
   );
 }
 
-function InlineStageForm({ busy, onCancel, onSave }: { busy: boolean; onCancel: () => void; onSave: (payload: SubtaskDraft) => Promise<void> }) {
-  const [title, setTitle] = useState("");
+
+function ExecutionItemModal({
+  open,
+  onClose,
+  item,
+  subtaskTitle,
+  busy,
+  onSave,
+}: {
+  open: boolean;
+  onClose: () => void;
+  item: ItemNode | null;
+  subtaskTitle: string;
+  busy: boolean;
+  onSave: (payload: ItemDraft) => Promise<void>;
+}) {
+  const [text, setText] = useState("");
+  const [durationDays, setDurationDays] = useState<number | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    setText(item?.text || "");
+    setDurationDays(item?.durationDays ?? null);
+  }, [open, item]);
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (!title.trim()) return;
-    await onSave({ title: title.trim(), itemTexts: [] });
+    if (!text.trim()) return;
+    await onSave({ text: text.trim(), durationDays });
   };
-  return <form onSubmit={(event) => void submit(event)} className="border-b p-2" style={{ borderColor: "var(--border)", background: "var(--surface-2)" }}><input autoFocus className="field h-8 text-xs" value={title} onChange={(event) => setTitle(event.target.value)} placeholder="اسم مرحلة العمل" required /><div className="mt-1.5 flex justify-end gap-1"><button type="button" className="btn h-7 px-2 text-[10px]" onClick={onCancel} disabled={busy}>إلغاء</button><button className="btn-primary h-7 px-2 text-[10px]" disabled={busy || !title.trim()}>{busy && <Loader2 size={12} className="animate-spin" />}إضافة المرحلة</button></div></form>;
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={item ? "تعديل بند التنفيذ" : "إضافة بند تنفيذ"}
+      subtitle={`ضمن المرحلة: ${subtaskTitle}`}
+      maxWidth="max-w-xl"
+    >
+      <form onSubmit={(event) => void submit(event)}>
+        <div className="space-y-3 p-4">
+          <label>
+            <span className="label">اسم بند التنفيذ *</span>
+            <input autoFocus className="field" value={text} onChange={(event) => setText(event.target.value)} required />
+          </label>
+          <label>
+            <span className="label">مدة التنفيذ بالأيام</span>
+            <input className="field" type="number" min={1} step={1} value={durationDays ?? ""} onChange={(event) => setDurationDays(event.target.value ? Number(event.target.value) : null)} placeholder="مثال: 2" />
+          </label>
+        </div>
+        <ModalFooter busy={busy} onClose={onClose} disabled={!text.trim()} submitLabel={item ? "حفظ التعديلات" : "إضافة بند التنفيذ"} />
+      </form>
+    </Modal>
+  );
 }
 
 function SubtaskModal({
@@ -4178,11 +4708,13 @@ function SubtaskModal({
   onSave: (payload: SubtaskDraft) => Promise<void>;
 }) {
   const [title, setTitle] = useState("");
+  const [durationDays, setDurationDays] = useState<number | null>(null);
   const [items, setItems] = useState("");
   const [manualStatus, setManualStatus] = useState<WorkStatus>("NOT_STARTED");
   useEffect(() => {
     if (open) {
       setTitle(subtask?.title || "");
+      setDurationDays(subtask?.durationDays ?? null);
       setItems("");
       setManualStatus(subtask?.manualStatus || "NOT_STARTED");
     }
@@ -4192,6 +4724,7 @@ function SubtaskModal({
     if (!title.trim()) return;
     await onSave({
       title: title.trim(),
+      durationDays,
       itemTexts: items
         .split("\n")
         .map((item) => item.trim())
@@ -4219,6 +4752,10 @@ function SubtaskModal({
               placeholder="مثال: المعاينة والتوثيق الميداني"
               required
             />
+          </label>
+          <label>
+            <span className="label">مدة المرحلة بالأيام</span>
+            <input className="field" type="number" min={1} step={1} value={durationDays ?? ""} onChange={(event) => setDurationDays(event.target.value ? Number(event.target.value) : null)} placeholder="مثال: 3" />
           </label>
           {subtask ? (
             <div>
