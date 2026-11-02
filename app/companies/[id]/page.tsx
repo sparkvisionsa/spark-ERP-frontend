@@ -5,6 +5,8 @@ import { useAuth } from "@/components/auth-provider";
 import { Modal } from "@/components/ui";
 import { AnalyticsOverview } from "@/lib/analytics";
 import { apiRequest, ApiError } from "@/lib/api";
+import { confirmInCurrentLanguage, intlLocale } from "@/lib/i18n";
+import { useLanguage } from "@/components/language-provider";
 import { companies, CompanyKey } from "@/lib/data";
 import { AlertTriangle, Check, ClipboardCheck, Edit3, ExternalLink, FolderKanban, Loader2, Mail, MapPin, Phone, Plus, RefreshCw, Search, Trash2, Truck, UserRound, Users, X } from "lucide-react";
 import Link from "next/link";
@@ -39,6 +41,7 @@ export default function CompanyPage({ params }: { params: Promise<{ id: string }
   const route = use(params);
   const key: CompanyKey = route.id;
   const { user } = useAuth();
+  const { locale } = useLanguage();
   const [organisation, setOrganisation] = useState<{ key: string; name: string; logoUrl?: string; color?: string; departments?: Array<{ name: string }> } | null>(null);
   const [departmentName, setDepartmentName] = useState("");
   const [editingDepartment, setEditingDepartment] = useState<string | null>(null);
@@ -63,9 +66,9 @@ export default function CompanyPage({ params }: { params: Promise<{ id: string }
 
   const addDepartment = async () => { if (!departmentName.trim()) return; try { const updated = await apiRequest<typeof organisation>(`/companies/${key}/departments`, { method: "POST", body: JSON.stringify({ name: departmentName.trim() }) }); setOrganisation(updated); setDepartmentName(""); } catch (caught) { setError(caught instanceof ApiError ? caught.message : "تعذر إضافة القسم"); } };
   const updateDepartment = async (currentName: string) => { if (!editingDepartmentName.trim()) return; try { const updated = await apiRequest<typeof organisation>(`/companies/${key}/departments/${encodeURIComponent(currentName)}`, { method: "PATCH", body: JSON.stringify({ name: editingDepartmentName.trim() }) }); setOrganisation(updated); setEditingDepartment(null); setEditingDepartmentName(""); } catch (caught) { setError(caught instanceof ApiError ? caught.message : "تعذر تعديل القسم"); } };
-  const removeDepartment = async (name: string) => { if (!window.confirm(`حذف قسم «${name}»؟`)) return; try { const updated = await apiRequest<typeof organisation>(`/companies/${key}/departments/${encodeURIComponent(name)}`, { method: "DELETE" }); setOrganisation(updated); } catch (caught) { setError(caught instanceof ApiError ? caught.message : "تعذر حذف القسم"); } };
+  const removeDepartment = async (name: string) => { if (!confirmInCurrentLanguage(`حذف قسم «${name}»؟`, `Delete department “${name}”?`)) return; try { const updated = await apiRequest<typeof organisation>(`/companies/${key}/departments/${encodeURIComponent(name)}`, { method: "DELETE" }); setOrganisation(updated); } catch (caught) { setError(caught instanceof ApiError ? caught.message : "تعذر حذف القسم"); } };
   return <AppShell title={company.name} actions={<><button className="btn h-8 px-2.5 text-[11px]" onClick={() => setEmployeesOpen(true)}><Users size={14} />عرض الموظفين{stats ? <span className="status status-neutral px-1.5 py-0.5">{stats.employees}</span> : null}</button><button className="btn-ghost" onClick={() => void load()} aria-label="تحديث"><RefreshCw size={15} className={loading ? "animate-spin" : ""} /></button></>}><div className="mx-auto max-w-[1400px] space-y-4">
-    <section className="card relative overflow-hidden p-5"><div className="absolute inset-y-0 end-0 w-1.5" style={{ background: companyColor }} /><div className="flex flex-wrap items-center gap-4"><span className="flex h-12 w-12 items-center justify-center overflow-hidden rounded-xl" style={{ background: `${companyColor}15`, color: companyColor }}>{organisation?.logoUrl ? <img src={organisation.logoUrl} alt={`شعار ${company.name}`} className="h-full w-full object-contain" /> : <Icon size={24} />}</span><div className="flex-1"><div className="flex items-center gap-2"><h2 className="text-lg font-medium">{company.name}</h2><span className="status status-success">نشطة</span></div><p className="mt-1 text-xs" style={{ color: "var(--muted)" }}>مساحة عمل الشركة</p></div><span className="text-[11px]" style={{ color: "var(--muted)" }}>آخر تحديث {data ? new Intl.DateTimeFormat("ar-SA", { hour: "numeric", minute: "2-digit" }).format(new Date(data.generatedAt)) : "—"}</span></div></section>
+    <section className="card relative overflow-hidden p-5"><div className="absolute inset-y-0 end-0 w-1.5" style={{ background: companyColor }} /><div className="flex flex-wrap items-center gap-4"><span className="flex h-12 w-12 items-center justify-center overflow-hidden rounded-xl" style={{ background: `${companyColor}15`, color: companyColor }}>{organisation?.logoUrl ? <img src={organisation.logoUrl} alt={`شعار ${company.name}`} className="h-full w-full object-contain" /> : <Icon size={24} />}</span><div className="flex-1"><div className="flex items-center gap-2"><h2 className="text-lg font-medium">{company.name}</h2><span className="status status-success">نشطة</span></div><p className="mt-1 text-xs" style={{ color: "var(--muted)" }}>مساحة عمل الشركة</p></div><span className="text-[11px]" style={{ color: "var(--muted)" }}>آخر تحديث {data ? new Intl.DateTimeFormat(intlLocale(locale), { hour: "numeric", minute: "2-digit" }).format(new Date(data.generatedAt)) : "—"}</span></div></section>
     {error && <div className="rounded-lg px-3 py-2 text-xs" style={{ background: "var(--danger-soft)", color: "var(--danger)" }}>{error}</div>}
     {loading && !data ? <div className="card flex min-h-52 items-center justify-center"><Loader2 className="animate-spin text-brand" /></div> : !stats ? <div className="card p-10 text-center text-sm" style={{ color: "var(--muted)" }}>لا تملك صلاحية عرض بيانات هذه الشركة أو لا توجد بيانات مسجلة.</div> : <>
       <section className="grid gap-3 sm:grid-cols-4"><CompanyStat label="المشاريع النشطة" value={String(stats.activeProjects)} icon={<FolderKanban size={18} />} color={companyColor} /><CompanyStat label="الموظفون النشطون" value={`${stats.activeEmployees}/${stats.employees}`} icon={<Users size={18} />} color="#1D9E75" /><CompanyStat label="نسبة الإنجاز" value={`${stats.completionRate}%`} icon={<ClipboardCheck size={18} />} color="#BA7517" /><CompanyStat label="المهام المتأخرة" value={String(stats.overdueTasks)} icon={<AlertTriangle size={18} />} color="#E24B4A" /></section>
@@ -177,7 +180,7 @@ function CompanyEmployeesModal({
     if (
       !id ||
       busyId ||
-      !window.confirm(`هل تريد حذف حساب الموظف «${employee.fullName}»؟`)
+      !confirmInCurrentLanguage(`هل تريد حذف حساب الموظف «${employee.fullName}»؟`, `Delete employee account “${employee.fullName}”?`)
     )
       return;
     setBusyId(id);

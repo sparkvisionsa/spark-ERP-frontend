@@ -1,19 +1,43 @@
 "use client";
 
-import { ArrowLeft, BarChart3, Bolt, CheckCircle2, Eye, EyeOff, FolderKanban, LockKeyhole, ShieldCheck, Sparkles, Users } from "lucide-react";
-import { FormEvent, useState } from "react";
+import { ArrowLeft, BarChart3, Bolt, CheckCircle2, Eye, EyeOff, FolderKanban, Languages, LockKeyhole, ShieldCheck, Sparkles, Users } from "lucide-react";
+import { FormEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/components/auth-provider";
-import { ApiError } from "@/lib/api";
+import { API_URL, ApiError } from "@/lib/api";
+import { useLanguage } from "@/components/language-provider";
+
+type PublicSummary = { activeProjects: number; activeEmployees: number; completionRate: number };
 
 export default function LoginPage() {
   const router = useRouter();
   const { login } = useAuth();
+  const { locale, toggleLocale } = useLanguage();
   const [showPassword, setShowPassword] = useState(false);
   const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [summary, setSummary] = useState<PublicSummary | null>(null);
+  const [summaryLoading, setSummaryLoading] = useState(true);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const loadSummary = async () => {
+      try {
+        const response = await fetch(`${API_URL}/analytics/public-summary`, { cache: "no-store", credentials: "omit", signal: controller.signal });
+        if (!response.ok) throw new Error("Unable to load summary");
+        const data = await response.json() as PublicSummary;
+        if (Number.isFinite(data.activeProjects) && Number.isFinite(data.activeEmployees) && Number.isFinite(data.completionRate)) setSummary(data);
+        setSummaryLoading(false);
+      } catch {
+        if (!controller.signal.aborted) { setSummary(null); setSummaryLoading(false); }
+      }
+    };
+    void loadSummary();
+    const refresh = window.setInterval(() => void loadSummary(), 60_000);
+    return () => { controller.abort(); window.clearInterval(refresh); };
+  }, []);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -23,7 +47,8 @@ export default function LoginPage() {
     catch (error) { setError(error instanceof ApiError ? error.message : "تعذر الاتصال بالخادم، تأكد من تشغيل الباك إند"); setLoading(false); }
   };
 
-  return <main className="relative min-h-screen overflow-hidden bg-[#f8f8fb] p-3 md:p-6" dir="rtl">
+  return <main className="relative min-h-screen overflow-hidden bg-[#f8f8fb] p-3 md:p-6" dir={locale === "ar" ? "rtl" : "ltr"}>
+    <button type="button" data-no-translate onClick={toggleLocale} className="absolute end-6 top-6 z-10 inline-flex h-9 items-center gap-1.5 rounded-xl border border-[#dedde5] bg-white px-3 text-xs font-medium text-[#393845] shadow-sm transition hover:border-[#534AB7] hover:text-[#534AB7]" aria-label={locale === "ar" ? "Switch to English" : "التبديل إلى العربية"}><Languages size={15} />{locale === "ar" ? "English" : "العربية"}</button>
     <div className="pointer-events-none absolute -start-24 -top-24 h-72 w-72 rounded-full bg-[#EEEDFE] blur-3xl" />
     <div className="mx-auto grid min-h-[calc(100vh-24px)] max-w-[1380px] overflow-hidden rounded-3xl border border-[#e6e5eb] bg-white shadow-[0_24px_80px_rgba(38,33,92,.12)] md:min-h-[calc(100vh-48px)] md:grid-cols-[1.02fr_.98fr]">
       <section className="relative hidden overflow-hidden bg-[#26215C] p-12 text-white md:flex md:flex-col md:justify-between">
@@ -31,8 +56,9 @@ export default function LoginPage() {
         <div className="relative"><div className="flex items-center gap-3"><span className="flex h-11 w-11 items-center justify-center rounded-2xl bg-white/10"><Bolt size={23} fill="currentColor" /></span><span className="text-xl font-medium">Spark ERP</span></div></div>
         <div className="relative max-w-lg"><span className="mb-5 inline-flex items-center gap-2 rounded-full bg-white/10 px-3 py-1.5 text-xs text-[#CECBF6]"><Sparkles size={14} />منصة واحدة لإدارة كل أعمالك</span><h1 className="text-4xl font-medium leading-[1.45] lg:text-5xl">كل شركاتك،<br />كل مشاريعك،<br /><span className="text-[#AFA9EC]">في مكان واحد.</span></h1><p className="mt-5 max-w-md text-sm leading-7 text-[#CECBF6]">رؤية شاملة للأداء، متابعة أدق للفرق، وإنجاز أسرع للمشاريع من لوحة عمل عربية متكاملة.</p></div>
         <div className="relative grid grid-cols-3 gap-3">
-          {[{ icon: FolderKanban, value: "17", label: "مشروعاً نشطاً" }, { icon: Users, value: "4", label: "موظفين" }, { icon: BarChart3, value: "64%", label: "متوسط الإنجاز" }].map(({ icon: Icon, value, label }) => <div key={label} className="rounded-2xl border border-white/10 bg-white/[.07] p-4 backdrop-blur"><Icon size={18} className="mb-4 text-[#AFA9EC]" /><div className="text-xl font-medium">{value}</div><div className="mt-1 text-[11px] text-[#AFA9EC]">{label}</div></div>)}
+          {[{ icon: FolderKanban, value: summary ? String(summary.activeProjects) : "—", label: "مشاريع نشطة" }, { icon: Users, value: summary ? String(summary.activeEmployees) : "—", label: "الموظفون النشطون" }, { icon: BarChart3, value: summary ? `${summary.completionRate}%` : "—", label: "متوسط الإنجاز" }].map(({ icon: Icon, value, label }) => <div key={label} className="rounded-2xl border border-white/10 bg-white/[.07] p-4 backdrop-blur"><Icon size={18} className="mb-4 text-[#AFA9EC]" /><div className="text-xl font-medium">{value}</div><div className="mt-1 text-[11px] text-[#AFA9EC]">{label}</div></div>)}
         </div>
+        <p className="relative text-[10px] text-[#CECBF6]">{summary ? "بيانات فعلية · تتحدث تلقائياً" : summaryLoading ? "جارٍ تحميل بيانات النظام" : "تعذر تحميل بيانات النظام"}</p>
       </section>
       <section className="flex items-center justify-center p-6 md:p-10 lg:p-16">
         <div className="w-full max-w-md">

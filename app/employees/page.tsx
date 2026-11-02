@@ -23,7 +23,9 @@ import {
 } from "lucide-react";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { apiRequest, ApiError } from "@/lib/api";
+import { confirmInCurrentLanguage, intlLocale } from "@/lib/i18n";
 import { useAuth } from "@/components/auth-provider";
+import { useLanguage } from "@/components/language-provider";
 
 type ApiEmployee = {
   _id?: string;
@@ -132,6 +134,7 @@ const tabs = [
 
 export default function EmployeesPage() {
   const { user } = useAuth();
+  useLanguage();
   const isAdmin = user?.role === "SUPER_ADMIN";
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [organisations, setOrganisations] = useState<Organisation[]>([]);
@@ -438,7 +441,7 @@ export default function EmployeesPage() {
                     className="btn-ghost text-danger"
                     title="حذف الموظف"
                     onClick={async () => {
-                      if (!window.confirm(`هل تريد حذف حساب ${selected.name}؟`))
+                      if (!confirmInCurrentLanguage(`هل تريد حذف حساب ${selected.name}؟`, `Delete ${selected.name}'s account?`))
                         return;
                       await apiRequest(`/employees/${selected.id}`, {
                         method: "DELETE",
@@ -782,7 +785,7 @@ function HrPanel({
     id: string,
   ) => mutate(`/hr/employees/${employeeId}/${collection}/${id}`, "DELETE");
   const formatDate = (value: string) =>
-    new Intl.DateTimeFormat("ar-SA", { dateStyle: "medium" }).format(
+    new Intl.DateTimeFormat(intlLocale(), { dateStyle: "medium" }).format(
       new Date(value),
     );
 

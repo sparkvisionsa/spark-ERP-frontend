@@ -1,9 +1,11 @@
-"use client";
+﻿"use client";
 
 import AppShell from "@/components/app-shell";
 import { useAuth } from "@/components/auth-provider";
 import { Toast } from "@/components/ui";
 import { apiRequest, ApiError } from "@/lib/api";
+import { intlLocale } from "@/lib/i18n";
+import { useLanguage } from "@/components/language-provider";
 import { Bell, Building2, CheckCircle2, Database, KeyRound, Loader2, LockKeyhole, Palette, Save, ShieldCheck, UserRound } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
@@ -20,6 +22,7 @@ const sections = [
 
 export default function SettingsPage() {
   const { user, refreshUser } = useAuth();
+  const { locale } = useLanguage();
   const [section, setSection] = useState<(typeof sections)[number]["id"]>("general");
   const [data, setData] = useState<SettingsPayload | null>(null);
   const [loading, setLoading] = useState(true);
@@ -76,7 +79,7 @@ export default function SettingsPage() {
         {section === "security" && <div className="max-w-xl space-y-4"><div className="flex items-center gap-3 rounded-xl border p-4" style={{ borderColor: "var(--border)" }}><LockKeyhole size={20} color="var(--primary)" /><div><h3 className="text-sm font-medium">تغيير كلمة المرور</h3><p className="text-[11px]" style={{ color: "var(--muted)" }}>أدخل كلمة المرور الحالية ثم الجديدة، بحد أدنى 4 أحرف.</p></div></div><Field label="كلمة المرور الحالية"><input className="field" type="password" value={passwords.currentPassword} onChange={(event) => setPasswords({ ...passwords, currentPassword: event.target.value })} /></Field><div className="grid gap-3 sm:grid-cols-2"><Field label="كلمة المرور الجديدة"><input className="field" type="password" value={passwords.newPassword} onChange={(event) => setPasswords({ ...passwords, newPassword: event.target.value })} /></Field><Field label="تأكيد كلمة المرور"><input className="field" type="password" value={passwords.confirmPassword} onChange={(event) => setPasswords({ ...passwords, confirmPassword: event.target.value })} /></Field></div><button className="btn-primary" disabled={saving || !passwords.currentPassword || !passwords.newPassword} onClick={() => void changePassword()}><KeyRound size={15} />تغيير كلمة المرور</button></div>}
         {section === "notifications" && <div className="grid gap-2"><Toggle title="تفعيل الإشعارات" text="المفتاح الرئيسي لجميع تنبيهات الحساب" checked={data.preferences.notificationsEnabled} onChange={(value) => updatePreferences("notificationsEnabled", value)} /><Toggle title="إشعارات المهام" text="عند إسناد مهمة أو تغيير حالتها" checked={data.preferences.taskNotifications} onChange={(value) => updatePreferences("taskNotifications", value)} /><Toggle title="إشعارات التسليمات" text="عند إضافة ملف أو تسليم جديد" checked={data.preferences.deliveryNotifications} onChange={(value) => updatePreferences("deliveryNotifications", value)} /><Toggle title="الإشعارات البريدية" text="إرسال نسخة إلى بريدك الإلكتروني" checked={data.preferences.emailNotifications} onChange={(value) => updatePreferences("emailNotifications", value)} /></div>}
         {section === "appearance" && <div className="space-y-5"><div className="grid gap-3 sm:grid-cols-3">{(["system", "light", "dark"] as const).map((theme) => <button key={theme} onClick={() => applyTheme(theme)} className="rounded-xl border p-5 text-center text-sm" style={{ borderColor: data.preferences.theme === theme ? "var(--primary)" : "var(--border)", background: data.preferences.theme === theme ? "var(--primary-soft)" : "transparent", color: data.preferences.theme === theme ? "var(--primary)" : "var(--text)" }}>{theme === "system" ? "حسب الجهاز" : theme === "light" ? "فاتح" : "داكن"}</button>)}</div><Toggle title="الوضع المضغوط" text="تقليل ارتفاع البطاقات والمسافات لعرض بيانات أكثر" checked={data.preferences.compactMode} onChange={(value) => updatePreferences("compactMode", value)} /></div>}
-        {section === "data" && <div className="grid gap-3 sm:grid-cols-2"><InfoCard title="قاعدة البيانات" text="MongoDB متصلة — جميع المشاريع والموظفين والإحصاءات تُقرأ مباشرة." /><InfoCard title="حالة المزامنة" text="تحديث فوري عند الحفظ، مع إعادة حساب لوحة التحكم والتقارير من المصدر." /><InfoCard title="حماية البيانات" text="كلمات المرور مشفّرة، والجلسات محمية، والطلبات مقيدة حسب الدور والشركة." /><InfoCard title="آخر دخول" text={data.profile.lastLoginAt ? new Intl.DateTimeFormat("ar-SA", { dateStyle: "medium", timeStyle: "short" }).format(new Date(data.profile.lastLoginAt)) : "لا توجد بيانات"} /></div>}
+        {section === "data" && <div className="grid gap-3 sm:grid-cols-2"><InfoCard title="قاعدة البيانات" text="MongoDB متصلة — جميع المشاريع والموظفين والإحصاءات تُقرأ مباشرة." /><InfoCard title="حالة المزامنة" text="تحديث فوري عند الحفظ، مع إعادة حساب لوحة التحكم والتقارير من المصدر." /><InfoCard title="حماية البيانات" text="كلمات المرور مشفّرة، والجلسات محمية، والطلبات مقيدة حسب الدور والشركة." /><InfoCard title="آخر دخول" text={data.profile.lastLoginAt ? new Intl.DateTimeFormat(intlLocale(locale), { dateStyle: "medium", timeStyle: "short" }).format(new Date(data.profile.lastLoginAt)) : "لا توجد بيانات"} /></div>}
       </div>}
       {data && !["security", "data"].includes(section) && <footer className="flex justify-end border-t p-3" style={{ borderColor: "var(--border)", background: "var(--surface-2)" }}><button className="btn-primary" disabled={saving || (section === "general" && user?.role !== "SUPER_ADMIN")} onClick={() => void saveCurrent()}>{saving ? <Loader2 size={15} className="animate-spin" /> : <Save size={15} />}حفظ الإعدادات</button></footer>}
     </section>
@@ -86,3 +89,4 @@ export default function SettingsPage() {
 function Field({ label, children }: { label: string; children: React.ReactNode }) { return <label><span className="label">{label}</span>{children}</label>; }
 function Toggle({ title, text, checked, onChange, disabled }: { title: string; text: string; checked: boolean; onChange: (value: boolean) => void; disabled?: boolean }) { return <label className="flex items-center gap-3 rounded-xl border p-3" style={{ borderColor: "var(--border)", opacity: disabled ? .65 : 1 }}><span className="min-w-0 flex-1"><b className="block text-xs font-medium">{title}</b><span className="mt-0.5 block text-[11px]" style={{ color: "var(--muted)" }}>{text}</span></span><input type="checkbox" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} className="h-4 w-4 accent-brand" /></label>; }
 function InfoCard({ title, text }: { title: string; text: string }) { return <div className="rounded-xl border p-4" style={{ borderColor: "var(--border)" }}><CheckCircle2 size={19} color="var(--success)" /><h3 className="mt-3 text-sm font-medium">{title}</h3><p className="mt-1 text-xs leading-6" style={{ color: "var(--muted)" }}>{text}</p></div>; }
+

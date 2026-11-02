@@ -4,6 +4,8 @@ import AppShell from "@/components/app-shell";
 import { useAuth } from "@/components/auth-provider";
 import { AnalyticsOverview } from "@/lib/analytics";
 import { apiRequest, ApiError } from "@/lib/api";
+import { intlLocale } from "@/lib/i18n";
+import { useLanguage } from "@/components/language-provider";
 import { companies, CompanyKey } from "@/lib/data";
 import { BarChart3, CalendarRange, CheckCircle2, Download, FolderKanban, Loader2, RefreshCw, TimerReset, TrendingUp } from "lucide-react";
 import Link from "next/link";
@@ -14,6 +16,7 @@ type CompanyFilter = "all" | CompanyKey;
 
 export default function ReportsPage() {
   const { user } = useAuth();
+  const { locale } = useLanguage();
   const [company, setCompany] = useState<CompanyFilter>("all");
   const [days, setDays] = useState(30);
   const [data, setData] = useState<AnalyticsOverview | null>(null);
@@ -49,7 +52,7 @@ export default function ReportsPage() {
     { label: "متوسط عمر المهمة", value: `${summary?.averageTaskAgeDays ?? 0} يوم`, detail: "للمهام غير المكتملة", icon: TimerReset, color: "#185FA5" },
     { label: "مشاريع نشطة", value: summary?.activeProjects ?? 0, detail: `${summary?.newProjects ?? 0} جديدة خلال الفترة`, icon: FolderKanban, color: "#BA7517" }
   ];
-  const weekly = (data?.weekly || []).map((row) => ({ ...row, day: new Intl.DateTimeFormat("ar-SA", { weekday: "short" }).format(new Date(`${row.date}T12:00:00`)) }));
+  const weekly = (data?.weekly || []).map((row) => ({ ...row, day: new Intl.DateTimeFormat(intlLocale(locale), { weekday: "short" }).format(new Date(`${row.date}T12:00:00`)) }));
 
   return <AppShell title="التقارير" actions={<button className="btn hidden sm:flex" onClick={exportCsv} disabled={!data}><Download size={15} />تصدير CSV</button>}><div className="mx-auto max-w-[1500px] space-y-4">
     <div className="flex flex-wrap items-center justify-between gap-2 border-b p-2" style={{ borderColor: "var(--border)" }}>

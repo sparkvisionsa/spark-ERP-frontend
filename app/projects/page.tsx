@@ -1,10 +1,12 @@
-"use client";
+﻿"use client";
 
 import AppShell from "@/components/app-shell";
 import { useAuth } from "@/components/auth-provider";
 import { Avatar, Modal, Progress, Toast } from "@/components/ui";
 import { API_URL, ApiError, apiRequest, apiUpload } from "@/lib/api";
 import { companies, CompanyKey, Employee } from "@/lib/data";
+import { confirmInCurrentLanguage, intlLocale } from "@/lib/i18n";
+import { useLanguage } from "@/components/language-provider";
 import {
   AlertTriangle,
   Archive,
@@ -228,6 +230,7 @@ type SubtaskDraft = {
 };
 type ItemDraft = { text: string; durationDays: number | null };
 type ProjectSort = "manual" | "due" | "progress" | "name";
+type ProjectStatusFilter = "all" | "active" | "completed" | "overdue";
 type TaskFilter = "all" | "open" | "late" | Priority;
 type DragEntity = "project" | "member" | "task" | "subtask" | "item";
 
@@ -346,7 +349,7 @@ function collectAssignedTasks(apiProjects: ApiProject[], employeeId?: string): A
 }
 function shortDate(value?: string | null) {
   return value
-    ? new Intl.DateTimeFormat("ar-SA", {
+    ? new Intl.DateTimeFormat(intlLocale(), {
         day: "numeric",
         month: "short",
       }).format(new Date(value))
@@ -369,6 +372,7 @@ function isOverdue(value: string | null | undefined, progress: number) {
 
 export default function ProjectsPage() {
   const { user } = useAuth();
+  useLanguage();
   const canManage = user?.role === "SUPER_ADMIN" || user?.role === "SUPERVISOR";
   const [projects, setProjects] = useState<WorkspaceProject[]>([]);
   const [runningWork, setRunningWork] = useState<RunningWorkEntry[]>([]);
@@ -381,9 +385,9 @@ export default function ProjectsPage() {
   const [subtaskId, setSubtaskId] = useState("");
   const [itemId, setItemId] = useState("");
   const [filter, setFilter] = useState<"all" | CompanyKey | "archive">("all");
+  const [projectStatusFilter, setProjectStatusFilter] = useState<ProjectStatusFilter>("all");
   const [query, setQuery] = useState("");
   const [projectSort, setProjectSort] = useState<ProjectSort>("manual");
-  const [attentionOnly, setAttentionOnly] = useState(false);
   const [taskQuery, setTaskQuery] = useState("");
   const [taskFilter, setTaskFilter] = useState<TaskFilter>("all");
   const [companyKeys, setCompanyKeys] = useState<CompanyKey[]>([]);
@@ -653,7 +657,13 @@ export default function ProjectsPage() {
             (filter === "archive"
               ? entry.status === "ARCHIVED"
               : entry.status !== "ARCHIVED") &&
-            (!attentionOnly || isOverdue(entry.dueDate, entry.progress)) &&
+            (filter === "archive" ||
+              projectStatusFilter === "all" ||
+              (projectStatusFilter === "active" && entry.status === "ACTIVE") ||
+              (projectStatusFilter === "completed" &&
+                (entry.status === "COMPLETED" || entry.progress === 100)) ||
+              (projectStatusFilter === "overdue" &&
+                isOverdue(entry.dueDate, entry.progress))) &&
             `${entry.name} ${entry.client} ${companyMeta(entry.company).name}`
               .toLocaleLowerCase("ar")
               .includes(query.trim().toLocaleLowerCase("ar")),
@@ -670,7 +680,7 @@ export default function ProjectsPage() {
                     b.dueDate || "9999-12-31",
                   )),
         ),
-    [projects, filter, query, attentionOnly, projectSort],
+    [projects, filter, projectStatusFilter, query, projectSort],
   );
   const totalTasks = projects
     .filter((entry) => entry.status !== "ARCHIVED")
@@ -684,8 +694,22 @@ export default function ProjectsPage() {
           activeProjects.length,
       )
     : 0;
-  const overdueProjects = activeProjects.filter((entry) =>
+  const companyProjects = activeProjects.filter(
+    (entry) => filter === "all" || filter === "archive" || entry.company === filter,
+  );
+  const activeProjectCount = companyProjects.filter(
+    (entry) => entry.status === "ACTIVE",
+  ).length;
+  const completedProjectCount = companyProjects.filter(
+    (entry) => entry.status === "COMPLETED" || entry.progress === 100,
+  ).length;
+  const overdueProjectCount = companyProjects.filter((entry) =>
     isOverdue(entry.dueDate, entry.progress),
+  ).length;
+  const archivedProjectCount = projects.filter(
+    (entry) =>
+      entry.status === "ARCHIVED" &&
+      (filter === "all" || filter === "archive" || entry.company === filter),
   ).length;
   const visibleEmployeeTasks = useMemo(
     () =>
@@ -744,6 +768,7 @@ export default function ProjectsPage() {
   }
   function chooseFilter(nextFilter: typeof filter) {
     setFilter(nextFilter);
+    setProjectStatusFilter("all");
     const keepProject = Boolean(
       project &&
       (nextFilter === "archive"
@@ -766,6 +791,31 @@ export default function ProjectsPage() {
         },
         nextFilter,
       );
+  }
+  function chooseProjectStatus(nextStatus: ProjectStatusFilter) {
+    const nextCompanyFilter = filter === "archive" ? "all" : filter;
+    const selectedProjectMatches = Boolean(
+      project &&
+        project.status !== "ARCHIVED" &&
+        (nextCompanyFilter === "all" || project.company === nextCompanyFilter) &&
+        (nextStatus === "all" ||
+          (nextStatus === "active" && project.status === "ACTIVE") ||
+          (nextStatus === "completed" &&
+            (project.status === "COMPLETED" || project.progress === 100)) ||
+          (nextStatus === "overdue" && isOverdue(project.dueDate, project.progress))),
+    );
+    setProjectStatusFilter(nextStatus);
+    if (filter === "archive") setFilter("all");
+    if (!selectedProjectMatches) {
+      clearWorkspaceSelection(true);
+      setLevel(0);
+      syncUrl({}, nextCompanyFilter);
+    } else {
+      syncUrl(
+        { p: projectId, e: employeeId, t: task?._id, s: subtask?._id, i: item?._id },
+        nextCompanyFilter,
+      );
+    }
   }
   function chooseProject(id: string) {
     // Selecting the active project must not clear its already loaded workflow.
@@ -1025,7 +1075,7 @@ export default function ProjectsPage() {
     } catch (caught) { showError(caught, "تعذر تغيير الترتيب بالسحب"); } finally { setBusy(false); }
   }
   async function deleteProject(target: WorkspaceProject | null = project) {
-    if (!target || busy || !window.confirm(`حذف مشروع «${target.name}»؟`))
+    if (!target || busy || !confirmInCurrentLanguage(`حذف مشروع «${target.name}»؟`, `Delete project “${target.name}”?`))
       return;
     setBusy(true);
     try {
@@ -1118,7 +1168,7 @@ export default function ProjectsPage() {
     if (
       !project ||
       busy ||
-      !window.confirm(`حذف مهمة «${target.title}» وكل تفاصيلها وتسليماتها؟`)
+      !confirmInCurrentLanguage(`حذف مهمة «${target.title}» وكل تفاصيلها وتسليماتها؟`, `Delete task “${target.title}” and all its subtasks and deliveries?`)
     )
       return;
     setBusy(true);
@@ -1256,7 +1306,7 @@ export default function ProjectsPage() {
     if (
       !project ||
       busy ||
-      !window.confirm(`حذف «${target.title}» وبنودها وتسليماتها؟`)
+      !confirmInCurrentLanguage(`حذف «${target.title}» وبنودها وتسليماتها؟`, `Delete “${target.title}” and all its checklist items and deliveries?`)
     )
       return;
     setBusy(true);
@@ -1312,7 +1362,7 @@ export default function ProjectsPage() {
     if (
       !project ||
       busy ||
-      !window.confirm(`حذف بند «${target.text}» وتسليماته؟`)
+      !confirmInCurrentLanguage(`حذف بند «${target.text}» وتسليماته؟`, `Delete checklist item “${target.text}” and its deliveries?`)
     )
       return;
     setBusy(true);
@@ -1418,7 +1468,7 @@ export default function ProjectsPage() {
     if (
       !project ||
       busy ||
-      !window.confirm("هل تريد حذف هذا التسليم ومرفقاته؟")
+      !confirmInCurrentLanguage("هل تريد حذف هذا التسليم ومرفقاته؟", "Delete this delivery and its attachments?")
     )
       return;
     setBusy(true);
@@ -1467,130 +1517,97 @@ export default function ProjectsPage() {
         style={{ borderColor: "var(--border)", background: "var(--surface-2)" }}
       >
         <div
-          className="flex min-h-11 flex-wrap items-center gap-2 border-b px-2.5 py-1.5"
+          className="border-b p-2 sm:p-2.5"
           style={{ borderColor: "var(--border)", background: "var(--surface)" }}
         >
-          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-brand text-white">
-            <FolderKanban size={16} />
-          </span>
-          <div
-            className="min-w-0 flex flex-1 items-center gap-1 overflow-hidden text-[10px]"
-            style={{ color: "var(--muted)" }}
-          >
-            {breadcrumbs.length ? (
-              breadcrumbs.map((crumb, index) => (
-                <span
-                  key={`${crumb}-${index}`}
-                  className="flex min-w-0 items-center gap-1"
-                >
-                  <span
-                    className="max-w-[135px] truncate"
-                    style={{
-                      color:
-                        index === breadcrumbs.length - 1
-                          ? "var(--text)"
-                          : undefined,
-                    }}
-                  >
-                    {crumb}
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-brand text-white shadow-sm">
+              <FolderKanban size={17} />
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className="text-[11px] font-semibold sm:text-xs">مساحة المشاريع والمهام</div>
+              <div className="mt-0.5 flex min-w-0 items-center gap-1 overflow-hidden text-[10px]" style={{ color: "var(--muted)" }}>
+                {breadcrumbs.length ? breadcrumbs.map((crumb, index) => (
+                  <span key={`${crumb}-${index}`} className="flex min-w-0 items-center gap-1">
+                    <span className="max-w-[130px] truncate" style={{ color: index === breadcrumbs.length - 1 ? "var(--text)" : undefined }}>
+                      <FullNameTooltip text={crumb} className="block truncate" />
+                    </span>
+                    {index < breadcrumbs.length - 1 && <ChevronLeft size={11} className="shrink-0" />}
                   </span>
-                  {index < breadcrumbs.length - 1 && <ChevronLeft size={11} />}
-                </span>
-              ))
-            ) : (
-              <span>اختر مشروعاً</span>
+                )) : <span>اختر مشروعاً لبدء المتابعة</span>}
+              </div>
+            </div>
+            <div className="hidden items-center gap-1.5 sm:flex">
+              <SummaryMetric label="المشاريع" value={activeProjects.length} icon={<FolderKanban size={12} />} />
+              <SummaryMetric label="المهام" value={totalTasks} icon={<ClipboardList size={12} />} />
+              <SummaryMetric label="الإنجاز" value={`${totalProgress}%`} icon={<CheckCircle2 size={12} />} />
+            </div>
+            <div className="relative w-full sm:w-48 md:w-56">
+              <Search className="absolute end-2.5 top-1/2 -translate-y-1/2" size={14} color="var(--muted)" />
+              <input
+                className="field h-9 pe-8 text-[11px]"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="ابحث عن مشروع أو عميل"
+                aria-label="بحث في المشاريع"
+              />
+            </div>
+            {canManage && (
+              <button className="btn-primary h-9 shrink-0 gap-1 px-2.5 text-[11px]" onClick={() => { setEditingProject(null); setProjectModal(true); }}>
+                <Plus size={14} /> مشروع جديد
+              </button>
             )}
           </div>
-          <span
-            className="hidden whitespace-nowrap text-[10px] lg:block"
-            style={{ color: "var(--muted)" }}
-          >
-            <b style={{ color: "var(--text)" }}>{activeProjects.length}</b>{" "}
-            مشروع · <b style={{ color: "var(--text)" }}>{totalTasks}</b> مهمة ·{" "}
-            <b style={{ color: "var(--text)" }}>{totalProgress}%</b>
-          </span>
-          <div className="relative order-last w-full sm:order-none sm:w-52">
-            <Search
-              className="absolute end-2 top-1/2 -translate-y-1/2"
-              size={13}
-              color="var(--muted)"
-            />
-            <input
-              className="field h-8 pe-7 text-[11px]"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="بحث في المشاريع"
-            />
-          </div>
-          {canManage && (
-            <button
-              className="btn-primary h-8 px-2 sm:hidden"
-              onClick={() => {
-                setEditingProject(null);
-                setProjectModal(true);
-              }}
-            >
-              <Plus size={13} />
-              جديد
-            </button>
-          )}
-        </div>
 
-        <div
-          className="flex flex-wrap items-center gap-1 border-b px-2 py-1.5"
-          style={{ borderColor: "var(--border)" }}
-        >
-          {([
-            { key: "all", label: "الكل" },
-            ...companyKeys.map((key) => ({ key, label: companyMeta(key).name })),
-            { key: "archive", label: "الأرشيف" },
-          ] as Array<{ key: "all" | "archive" | CompanyKey; label: string }>).map(({ key, label }) => (
-            <button
-              key={key}
-              onClick={() => chooseFilter(key)}
-              className={`chip h-7 whitespace-nowrap px-2 ${filter === key ? "chip-active" : ""}`}
-            >
-              {key === "archive" ? (
-                <Archive size={12} />
-              ) : (
-                key !== "all" && (
-                  <span
-                    className="h-1.5 w-1.5 rounded-full"
-                    style={{ background: companyMeta(key).color }}
-                  />
-                )
-              )}
-              {label}
-            </button>
-          ))}
-          <button
-            onClick={() => setAttentionOnly((value) => !value)}
-            className={`chip h-7 whitespace-nowrap px-2 ${attentionOnly ? "chip-active" : ""}`}
-            style={
-              attentionOnly
-                ? { background: "var(--danger-soft)", color: "var(--danger)" }
-                : undefined
-            }
-          >
-            <AlertTriangle size={12} />
-            متأخرة{overdueProjects ? ` ${overdueProjects}` : ""}
-          </button>
-          <label className="ms-auto flex items-center gap-1">
-            <ListFilter size={12} color="var(--muted)" />
-            <select
-              className="field h-7 w-auto min-w-[96px] px-1.5 text-[9px]"
-              value={projectSort}
-              onChange={(event) =>
-                setProjectSort(event.target.value as ProjectSort)
-              }
-              aria-label="ترتيب المشاريع"
-            >
-              <option value="manual">الترتيب اليدوي</option>
-              <option value="due">الأقرب موعداً</option>
-              <option value="progress">الأقل إنجازاً</option>
-              <option value="name">حسب الاسم</option>
-            </select>
-          </label>
+          <div className="mt-2 flex flex-wrap items-center gap-1.5 border-t pt-2" style={{ borderColor: "var(--border)" }}>
+            <span className="me-0.5 flex items-center gap-1 text-[10px] font-medium" style={{ color: "var(--muted)" }}><Users size={12} />الشركات</span>
+            {([
+              { key: "all", label: "كل الشركات" },
+              ...companyKeys.map((key) => ({ key, label: companyMeta(key).name })),
+              { key: "archive", label: "الأرشيف" },
+            ] as Array<{ key: "all" | "archive" | CompanyKey; label: string }>).map(({ key, label }) => (
+              <button key={key} onClick={() => chooseFilter(key)} className={`chip h-7 whitespace-nowrap gap-1.5 px-2.5 text-[10px] ${filter === key ? "chip-active" : ""}`}>
+                {key === "archive" ? <Archive size={12} /> : key !== "all" ? <span className="h-2 w-2 rounded-full" style={{ background: companyMeta(key).color }} /> : <FolderKanban size={12} />}
+                {label}
+                {key !== "archive" && <span className="opacity-70">{key === "all" ? activeProjects.length : projects.filter((entry) => entry.company === key && entry.status !== "ARCHIVED").length}</span>}
+              </button>
+            ))}
+            <label className="ms-auto flex items-center gap-1.5 text-[10px]" style={{ color: "var(--muted)" }}>
+              <ListFilter size={13} />
+              <select className="field h-7 w-auto min-w-[112px] px-2 text-[10px]" value={projectSort} onChange={(event) => setProjectSort(event.target.value as ProjectSort)} aria-label="ترتيب المشاريع">
+                <option value="manual">ترتيب يدوي</option>
+                <option value="due">الأقرب موعداً</option>
+                <option value="progress">الأقل إنجازاً</option>
+                <option value="name">حسب الاسم</option>
+              </select>
+            </label>
+          </div>
+
+          <div className="mt-2 grid grid-cols-2 gap-1.5 sm:grid-cols-3 lg:grid-cols-5">
+            {([
+              { key: "all", label: "كل المشاريع", count: companyProjects.length, icon: <FolderKanban size={14} />, color: "var(--primary)" },
+              { key: "active", label: "قيد التنفيذ", count: activeProjectCount, icon: <Play size={14} />, color: "var(--warning)" },
+              { key: "completed", label: "مكتملة", count: completedProjectCount, icon: <CheckCircle2 size={14} />, color: "var(--success)" },
+              { key: "overdue", label: "متأخرة", count: overdueProjectCount, icon: <AlertTriangle size={14} />, color: "var(--danger)" },
+              { key: "archive", label: "مؤرشفة", count: archivedProjectCount, icon: <Archive size={14} />, color: "var(--muted)" },
+            ] as const).map((card) => {
+              const selected = card.key === "archive" ? filter === "archive" : filter !== "archive" && projectStatusFilter === card.key;
+              return (
+                <button
+                  key={card.key}
+                  type="button"
+                  onClick={() => card.key === "archive" ? chooseFilter("archive") : chooseProjectStatus(card.key)}
+                  aria-pressed={selected}
+                  className="flex min-w-0 items-center gap-2 rounded-xl border px-2.5 py-2 text-start transition hover:-translate-y-px hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand sm:px-3"
+                  style={{ borderColor: selected ? `color-mix(in srgb, ${card.color} 35%, var(--border))` : "var(--border)", background: selected ? `color-mix(in srgb, ${card.color} 8%, var(--surface))` : "var(--surface)" }}
+                >
+                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg" style={{ color: card.color, background: `color-mix(in srgb, ${card.color} 12%, var(--surface))` }}>{card.icon}</span>
+                  <span className="min-w-0 flex-1 truncate text-[10px] font-medium sm:text-[11px]">{card.label}</span>
+                  <b className="text-sm tabular-nums" style={{ color: card.color }}>{card.count}</b>
+                </button>
+              );
+            })}
+          </div>
         </div>
 
         <div className={`mx-2 mt-1.5 grid min-w-0 gap-1.5 ${user?.role === "EMPLOYEE" ? "grid-cols-2" : "grid-cols-1"}`}>
@@ -2107,6 +2124,7 @@ export default function ProjectsPage() {
 }
 
 function FullNameTooltip({ text, className = "" }: { text: string; className?: string }) {
+  const { locale } = useLanguage();
   const anchorRef = useRef<HTMLSpanElement>(null);
   const tooltipRef = useRef<HTMLSpanElement>(null);
   const [open, setOpen] = useState(false);
@@ -2169,7 +2187,7 @@ function FullNameTooltip({ text, className = "" }: { text: string; className?: s
           ref={tooltipRef}
           className="full-name-tooltip"
           role="tooltip"
-          dir="rtl"
+          dir={locale === "ar" ? "rtl" : "ltr"}
           style={{ left: position.left, top: position.top }}
         >
           {text}
@@ -2226,6 +2244,16 @@ function ProjectBrief({ project }: { project: WorkspaceProject }) {
         {project.durationDays ? <> · المدة {project.durationDays} يوم</> : null}
       </span>
     </section>
+  );
+}
+
+function SummaryMetric({ label, value, icon }: { label: string; value: string | number; icon: React.ReactNode }) {
+  return (
+    <span className="flex items-center gap-1 rounded-lg border px-2 py-1 text-[9px]" style={{ borderColor: "var(--border)", color: "var(--muted)", background: "var(--surface-2)" }}>
+      <span style={{ color: "var(--primary)" }}>{icon}</span>
+      <span>{label}</span>
+      <b className="text-[10px]" style={{ color: "var(--text)" }}>{value}</b>
+    </span>
   );
 }
 
@@ -3683,7 +3711,7 @@ function DeliveryCard({
               className="shrink-0 text-[8px]"
               style={{ color: "var(--muted)" }}
             >
-              {new Intl.DateTimeFormat("ar-SA", {
+              {new Intl.DateTimeFormat(intlLocale(), {
                 day: "numeric",
                 month: "short",
                 hour: "numeric",
@@ -4894,3 +4922,4 @@ function ModalFooter({
     </footer>
   );
 }
+

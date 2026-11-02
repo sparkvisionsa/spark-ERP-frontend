@@ -292,6 +292,17 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .erp-content .space-y-5 > :not([hidden]) ~ :not([hidden]),
 .erp-content .space-y-6 > :not([hidden]) ~ :not([hidden]) { margin-top: .5rem !important; }
 
+/* Keep the workspace navigation on the reading-start edge in English. */
+[data-locale="en"] body { font-family: Inter, ui-sans-serif, system-ui, Arial, sans-serif; }
+[data-locale="en"] .text-right { text-align: left; }
+[data-locale="en"] .text-left { text-align: right; }
+[data-locale="en"] .erp-sidebar { right: auto; left: 0; border-left: 0; border-right: 1px solid var(--border); }
+[data-locale="en"] .sidebar-company-link:hover:not([data-active="true"]) { box-shadow: inset 3px 0 rgba(255,255,255,.76), 0 6px 16px rgba(39,7,14,.28); }
+[data-locale="en"] .sidebar-company-link[data-active="true"] { box-shadow: inset 4px 0 rgba(255,255,255,.9), 0 7px 20px rgba(39,7,14,.34); }
+@media (min-width: 768px) {
+  [data-locale="en"] .erp-shell { padding-right: 0; padding-left: var(--sidebar-width); }
+}
+
 /* Dashboard-only density: keep the complete desktop overview inside short viewports. */
 .dashboard-compact {
   padding: .375rem;

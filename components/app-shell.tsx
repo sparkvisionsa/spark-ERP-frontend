@@ -5,13 +5,15 @@ import { usePathname, useRouter } from "next/navigation";
 import {
   BarChart3, Bell, Bolt, Building2, Check, ChevronDown, ChevronLeft, ChevronsLeft,
   ChevronsRight, CircleHelp, ClipboardCheck, FolderKanban, LayoutDashboard, LogOut,
-  Menu, Moon, PanelRightClose, Search, Settings, Sun, Truck, Users, X,
+  Languages, Menu, Moon, PanelRightClose, Search, Settings, Sun, Truck, Users, X,
 } from "lucide-react";
 import { ReactNode, useEffect, useMemo, useState } from "react";
 import { Avatar } from "./ui";
 import { useAuth } from "./auth-provider";
 import { apiRequest } from "@/lib/api";
 import { companies } from "@/lib/data";
+import { useLanguage } from "./language-provider";
+import { translateText } from "@/lib/i18n";
 
 const navItems = [
   { href: "/dashboard", label: "لوحة التحكم", description: "نظرة شاملة على الأعمال", icon: LayoutDashboard },
@@ -33,6 +35,7 @@ export default function AppShell({ children, title, description, actions, compac
   const pathname = usePathname();
   const router = useRouter();
   const { user, loading: authLoading, logout } = useAuth();
+  const { locale, toggleLocale } = useLanguage();
   const [dark, setDark] = useState(false);
   const [mobile, setMobile] = useState(false);
   // AppShell is recreated between page routes, so retain the companies list on company pages.
@@ -114,7 +117,7 @@ export default function AppShell({ children, title, description, actions, compac
   const compactSidebar = collapsed && !mobile;
   const sidebarWidth = hidden ? "0px" : collapsed ? "76px" : "272px";
   const allQuickLinks = useMemo(() => [...navItems, ...dynamicCompanies], [dynamicCompanies]);
-  const visibleQuickLinks = allQuickLinks.filter((item) => `${item.label} ${item.description}`.includes(searchQuery.trim()));
+  const visibleQuickLinks = allQuickLinks.filter((item) => `${translateText(item.label, locale)} ${translateText(item.description, locale)}`.toLowerCase().includes(searchQuery.trim().toLowerCase()));
   const roleLabel = user?.role === "SUPER_ADMIN" ? "مدير النظام" : user?.role === "SUPERVISOR" ? "مشرف" : "موظف";
 
   return <div className="erp-shell min-h-screen" style={{ "--sidebar-width": sidebarWidth } as React.CSSProperties}>
@@ -188,7 +191,7 @@ export default function AppShell({ children, title, description, actions, compac
         <button className="btn-ghost md:hidden" onClick={() => setMobile(true)} aria-label="فتح القائمة"><Menu size={20} /></button>
         {hidden && <button className="hidden h-9 items-center gap-2 rounded-xl border px-2.5 text-xs font-medium shadow-sm md:flex" onClick={() => setMode("expanded")} style={{ background: "var(--surface)", borderColor: "var(--border)", color: "var(--primary)" }} title="إظهار الشريط الجانبي"><Bolt size={17} fill="currentColor" /><span>Spark ERP</span><ChevronsLeft size={15} /></button>}
         <div className="min-w-0 flex-1"><h1 className="truncate text-sm font-medium">{title}</h1>{description && <p className="hidden truncate text-[9px] sm:block" style={{ color: "var(--muted)" }}>{description}</p>}</div>
-        <div className="flex items-center gap-1">{actions}<button className="btn hidden h-8 min-w-[140px] justify-start px-2 text-[11px] xl:flex" style={{ color: "var(--muted)" }} onClick={openSearch}><Search size={14} /><span>بحث سريع</span><kbd className="ms-auto rounded px-1 text-[9px]" style={{ background: "var(--surface-3)" }}>Ctrl K</kbd></button><button className="btn-ghost relative" aria-label="الإشعارات"><Bell size={17} /><span className="absolute end-1.5 top-1.5 h-1.5 w-1.5 rounded-full" style={{ background: "var(--danger)" }} /></button></div>
+        <div className="flex items-center gap-1">{actions}<button type="button" data-no-translate className="btn h-8 gap-1.5 px-2 text-[10px] sm:text-[11px]" onClick={toggleLocale} aria-label={locale === "ar" ? "Switch to English" : "التبديل إلى العربية"} title={locale === "ar" ? "Switch to English" : "التبديل إلى العربية"}><Languages size={15} /><span>{locale === "ar" ? "English" : "العربية"}</span></button><button className="btn hidden h-8 min-w-[140px] justify-start px-2 text-[11px] xl:flex" style={{ color: "var(--muted)" }} onClick={openSearch}><Search size={14} /><span>بحث سريع</span><kbd className="ms-auto rounded px-1 text-[9px]" style={{ background: "var(--surface-3)" }}>Ctrl K</kbd></button><button className="btn-ghost relative" aria-label="الإشعارات"><Bell size={17} /><span className="absolute end-1.5 top-1.5 h-1.5 w-1.5 rounded-full" style={{ background: "var(--danger)" }} /></button></div>
       </header>
       <main className="erp-content">{children}</main>
     </div>

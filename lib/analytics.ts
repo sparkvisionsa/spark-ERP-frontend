@@ -33,9 +33,9 @@ export type AnalyticsOverview = {
   weekly: Array<{ date: string; added: number; done: number }>;
 };
 
-export function relativeTime(value: string) {
+export function relativeTime(value: string, locale: "ar" | "en" = "ar") {
   const difference = new Date(value).getTime() - Date.now();
-  const formatter = new Intl.RelativeTimeFormat("ar", { numeric: "auto" });
+  const formatter = new Intl.RelativeTimeFormat(locale === "en" ? "en-US" : "ar", { numeric: "auto" });
   const minutes = Math.round(difference / 60_000);
   if (Math.abs(minutes) < 60) return formatter.format(minutes, "minute");
   const hours = Math.round(difference / 3_600_000);
