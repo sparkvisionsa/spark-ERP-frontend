@@ -4,6 +4,22 @@ export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
 }
 
+let refreshRequest: Promise<boolean> | null = null;
+
+function refreshSession() {
+  if (!refreshRequest) {
+    refreshRequest = fetch(`${API_URL}/auth/refresh`, { method: "POST", credentials: "include" })
+      .then((response) => response.ok)
+      .catch(() => false)
+      .finally(() => { refreshRequest = null; });
+  }
+  return refreshRequest;
+}
+
+function notifySessionExpired() {
+  if (typeof window !== "undefined") window.dispatchEvent(new Event("spark:session-expired"));
+}
+
 async function parseResponse(response: Response) {
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -20,8 +36,10 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}, ret
     headers: { "Content-Type": "application/json", ...(options.headers || {}) }
   });
   if (response.status === 401 && retry && !path.includes("/auth/login") && !path.includes("/auth/refresh")) {
-    const refreshed = await fetch(`${API_URL}/auth/refresh`, { method: "POST", credentials: "include" });
-    if (refreshed.ok) return apiRequest<T>(path, options, false);
+    if (await refreshSession()) return apiRequest<T>(path, options, false);
+    notifySessionExpired();
+  } else if (response.status === 401 && !path.includes("/auth/login") && !path.includes("/auth/refresh")) {
+    notifySessionExpired();
   }
   return parseResponse(response) as Promise<T>;
 }
@@ -39,10 +57,10 @@ export function apiUpload<T>(path: string, form: FormData, onProgress?: (percent
       let data: Record<string, unknown> = {};
       try { data = request.responseText ? JSON.parse(request.responseText) : {}; } catch { /* non-JSON response */ }
       if (request.status === 401 && retry) {
-        try {
-          const refreshed = await fetch(`${API_URL}/auth/refresh`, { method: "POST", credentials: "include" });
-          if (refreshed.ok) { resolve(await apiUpload<T>(path, form, onProgress, false)); return; }
-        } catch { /* handled below */ }
+        if (await refreshSession()) { resolve(await apiUpload<T>(path, form, onProgress, false)); return; }
+        notifySessionExpired();
+      } else if (request.status === 401) {
+        notifySessionExpired();
       }
       if (request.status >= 200 && request.status < 300) { onProgress?.(100); resolve(data as T); return; }
       const rawMessage = data.message;

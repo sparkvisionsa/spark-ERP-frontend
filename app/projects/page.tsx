@@ -374,6 +374,7 @@ export default function ProjectsPage() {
   const { user } = useAuth();
   useLanguage();
   const canManage = user?.role === "SUPER_ADMIN" || user?.role === "SUPERVISOR";
+  const canCreateProject = canManage || Boolean(user?.role === "EMPLOYEE" && user.company);
   const [projects, setProjects] = useState<WorkspaceProject[]>([]);
   const [runningWork, setRunningWork] = useState<RunningWorkEntry[]>([]);
   const [assignedTasks, setAssignedTasks] = useState<AssignedTaskEntry[]>([]);
@@ -733,6 +734,10 @@ export default function ProjectsPage() {
       task &&
       (task.assigneeId === user.id || task.helperIds?.includes(user.id)),
     );
+  const canCreateTask = canManage || Boolean(
+    user?.role === "EMPLOYEE" && project?.memberIds.includes(user.id),
+  );
+  const canCreateSubtask = canManage || Boolean(user?.role === "EMPLOYEE" && canWorkOnTask);
   const receiptEmployeeId = user?.role === "EMPLOYEE" ? user.id : employeeId;
 
   function syncUrl(
@@ -1504,7 +1509,7 @@ export default function ProjectsPage() {
   ];
   const allowedCompanies = useMemo<CompanyKey[]>(
     () =>
-      user?.role === "SUPERVISOR" && user.company
+      (user?.role === "SUPERVISOR" || user?.role === "EMPLOYEE") && user.company
         ? [user.company]
         : companyKeys,
     [user?.role, user?.company, companyKeys],
@@ -1552,7 +1557,7 @@ export default function ProjectsPage() {
                 aria-label="بحث في المشاريع"
               />
             </div>
-            {canManage && (
+            {canCreateProject && (
               <button className="btn-primary h-9 shrink-0 gap-1 px-2.5 text-[11px]" onClick={() => { setEditingProject(null); setProjectModal(true); }}>
                 <Plus size={14} /> مشروع جديد
               </button>
@@ -1662,7 +1667,7 @@ export default function ProjectsPage() {
               count={visibleProjects.length}
               className={columnClass(0)}
               onAdd={
-                canManage
+                canCreateProject
                   ? () => {
                       setEditingProject(null);
                       setProjectModal(true);
@@ -1671,7 +1676,7 @@ export default function ProjectsPage() {
               }
             >
               <ColumnHead first="الاسم" second="الإنجاز" />
-              {canManage && allowedCompanies.length > 0 && <QuickAddInput placeholder="أضف مشروعًا سريعًا" busy={busy} onAdd={quickAddProject} />}
+              {canCreateProject && allowedCompanies.length > 0 && <QuickAddInput placeholder="أضف مشروعًا سريعًا" busy={busy} onAdd={quickAddProject} />}
               {loading ? (
                 <LoadingRows />
               ) : visibleProjects.length ? (
@@ -1792,7 +1797,7 @@ export default function ProjectsPage() {
               count={visibleEmployeeTasks.length}
               className={columnClass(2)}
               onAdd={
-                canManage && project
+                canCreateTask && project
                   ? () => {
                       setEditingTask(null);
                       setTaskModal(true);
@@ -1806,7 +1811,7 @@ export default function ProjectsPage() {
                 onQuery={setTaskQuery}
                 onFilter={setTaskFilter}
               />
-              {canManage && project && employeeId && <QuickAddInput placeholder="أضف مهمة سريعة" busy={busy} onAdd={quickAddTask} />}
+              {canCreateTask && project && employeeId && <QuickAddInput placeholder="أضف مهمة سريعة" busy={busy} onAdd={quickAddTask} />}
               {!project ? (
                 <ColumnEmpty
                   icon={<ClipboardList size={20} />}
@@ -1856,7 +1861,7 @@ export default function ProjectsPage() {
               count={task?.subtasks.length || 0}
               className={columnClass(3)}
               onAdd={
-                canManage && task
+                canCreateSubtask && task
                   ? () => {
                       setEditingSubtask(null);
                       setSubtaskModal(true);
@@ -1865,7 +1870,7 @@ export default function ProjectsPage() {
               }
             >
               <ColumnHead first="المهمة الفرعية" second="البنود" />
-              {canManage && task && <QuickAddInput placeholder="اسم مرحلة جديدة" busy={busy} onAdd={quickAddSubtask} />}
+              {canCreateSubtask && task && <QuickAddInput placeholder="اسم مرحلة جديدة" busy={busy} onAdd={quickAddSubtask} />}
               {!task ? (
                 <ColumnEmpty
                   icon={<ClipboardList size={20} />}
@@ -2056,12 +2061,13 @@ export default function ProjectsPage() {
         </div>
       </div>
 
-      {canManage && (
+      {canCreateProject && (
         <ProjectModal
           open={projectModal}
           onClose={() => !busy && setProjectModal(false)}
           project={editingProject}
-          employees={employees}
+          employees={canManage ? employees : employees.filter((employee) => employee.id === user?.id)}
+          fixedMemberId={user?.role === "EMPLOYEE" ? user.id : undefined}
           allowedCompanies={allowedCompanies}
           busy={busy}
           onSave={saveProject}
@@ -2077,7 +2083,7 @@ export default function ProjectsPage() {
           onSave={saveMembers}
         />
       )}
-      {canManage && project && (
+      {canCreateTask && project && (
         <TaskModal
           open={taskModal}
           onClose={() => {
@@ -2093,7 +2099,7 @@ export default function ProjectsPage() {
           onSave={saveTask}
         />
       )}
-      {canManage && task && (
+      {canCreateSubtask && task && (
         <SubtaskModal
           open={subtaskModal}
           onClose={() => {
@@ -3972,6 +3978,7 @@ function ProjectModal({
   onClose,
   project,
   employees,
+  fixedMemberId,
   allowedCompanies,
   busy,
   onSave,
@@ -3980,6 +3987,7 @@ function ProjectModal({
   onClose: () => void;
   project: WorkspaceProject | null;
   employees: Employee[];
+  fixedMemberId?: string;
   allowedCompanies: CompanyKey[];
   busy: boolean;
   onSave: (draft: ProjectDraft) => Promise<void>;
@@ -3998,11 +4006,11 @@ function ProjectModal({
     setName(project?.name || "");
     setDurationDays(project?.durationDays ?? null);
     setDueDate(project?.dueDate || "");
-    setMemberIds(project?.memberIds || []);
+    setMemberIds(project?.memberIds || (fixedMemberId ? [fixedMemberId] : []));
     setDescription(project?.description || "");
     setStartDate(project?.startDate || new Date().toISOString().slice(0, 10));
     setFormError("");
-  }, [open, project, allowedCompanies]);
+  }, [open, project, allowedCompanies, fixedMemberId]);
   const available = employees.filter(
     (employee) => employee.company === company && employee.status !== "غير نشط",
   );
@@ -4141,6 +4149,7 @@ function ProjectModal({
                   <button
                     type="button"
                     key={employee.id}
+                    disabled={employee.id === fixedMemberId}
                     onClick={() =>
                       setMemberIds((current) =>
                         current.includes(employee.id)

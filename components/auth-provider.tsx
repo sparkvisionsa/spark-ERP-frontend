@@ -25,6 +25,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     finally { setLoading(false); }
   }, []);
   useEffect(() => { void refreshUser(); }, [refreshUser]);
+  useEffect(() => {
+    const expireSession = () => { setUser(null); setLoading(false); };
+    window.addEventListener("spark:session-expired", expireSession);
+    return () => window.removeEventListener("spark:session-expired", expireSession);
+  }, []);
   const login = async (identifier: string, password: string) => {
     const result = await apiRequest<{ user: AuthUser }>("/auth/login", { method: "POST", body: JSON.stringify({ identifier, password }) }, false);
     setUser(result.user); return result.user;
