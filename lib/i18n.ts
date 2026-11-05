@@ -823,6 +823,12 @@ const arToEn: Record<string, string> = {
   "مؤرشفة": "Archived",
   "مساحة المشاريع والمهام": "Projects & Tasks Workspace",
   "مشروع جديد": "New project",
+  "رسالة نصية": "Text message",
+  "إرفاق مرفقات": "Attach files",
+  "رابط": "Link",
+  "أدوات إنشاء التسليم": "Delivery composer tools",
+  "اسحب وأفلت هنا أو اضغط للاختيار · 6 ملفات · 50MB للملف": "Drag files here or click to choose · 6 files · 50 MB each",
+  "تعذرت الترجمة": "Translation failed",
 };
 
 const enToAr: Record<string, string> = {};

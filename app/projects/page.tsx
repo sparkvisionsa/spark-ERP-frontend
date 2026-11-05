@@ -7,6 +7,7 @@ import { API_URL, ApiError, apiRequest, apiUpload } from "@/lib/api";
 import { companies, CompanyKey, Employee } from "@/lib/data";
 import { confirmInCurrentLanguage, intlLocale } from "@/lib/i18n";
 import { useLanguage } from "@/components/language-provider";
+import { TranslatableText } from "@/components/translatable-text";
 import {
   AlertTriangle,
   Archive,
@@ -15,6 +16,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronLeft,
+  Clock,
   CircleStop,
   ClipboardList,
   Download,
@@ -31,7 +33,10 @@ import {
   Link2,
   ListFilter,
   Loader2,
+  Maximize2,
+  MessageSquare,
   Mic,
+  Minimize2,
   MoreHorizontal,
   Paperclip,
   Pause,
@@ -95,6 +100,7 @@ type SubtaskNode = {
   durationDays?: number | null;
   manualStatus: WorkStatus;
   startedAt?: string | null;
+  firstStartedAt?: string | null;
   startedById?: string | null;
   elapsedSeconds?: number;
   order: number;
@@ -157,6 +163,7 @@ type ApiProject = {
   members: Array<string | ApiEmployee>;
   progress?: number;
   totalTasks?: number;
+  hasStartedWork?: boolean;
   tasks?: TaskNode[];
   deliveries?: DeliveryNode[];
 };
@@ -169,9 +176,32 @@ type RunningWorkEntry = {
   employeeName: string;
   taskId: string;
   taskTitle: string;
+  assigneeId: string;
+  helperIds: string[];
+  status: WorkStatus;
+  priority: Priority;
+  dueDate?: string | null;
+  startedAt?: string | null;
+  firstStartedAt?: string | null;
+  elapsedSeconds: number;
+  plannedDurationDays?: number | null;
+  progress: number;
   detailId?: string;
   detailTitle?: string;
 };
+type WorkNavigationEntry = Pick<
+  RunningWorkEntry,
+  | "key"
+  | "kind"
+  | "projectId"
+  | "projectName"
+  | "employeeId"
+  | "employeeName"
+  | "taskId"
+  | "taskTitle"
+  | "detailId"
+  | "detailTitle"
+>;
 type AssignedTaskEntry = {
   key: string;
   projectId: string;
@@ -199,6 +229,7 @@ type WorkspaceProject = {
   memberIds: string[];
   progress: number;
   totalTasks: number;
+  hasStartedWork: boolean;
 };
 type WorkspaceTree = Omit<ApiProject, "members"> & {
   members: ApiEmployee[];
@@ -209,7 +240,7 @@ type WorkspaceTree = Omit<ApiProject, "members"> & {
 };
 type ProjectDraft = Omit<
   WorkspaceProject,
-  "id" | "status" | "progress" | "totalTasks" | "isPinned" | "isFavorite" | "order"
+  "id" | "status" | "progress" | "totalTasks" | "hasStartedWork" | "isPinned" | "isFavorite" | "order"
 >;
 type TaskDraft = {
   title: string;
@@ -230,7 +261,7 @@ type SubtaskDraft = {
 };
 type ItemDraft = { text: string; durationDays: number | null };
 type ProjectSort = "manual" | "due" | "progress" | "name";
-type ProjectStatusFilter = "all" | "active" | "completed" | "overdue";
+type ProjectStatusFilter = "all" | "new" | "active" | "completed" | "overdue" | "archive";
 type TaskFilter = "all" | "open" | "late" | Priority;
 type DragEntity = "project" | "member" | "task" | "subtask" | "item";
 
@@ -278,6 +309,22 @@ function toEmployee(item: ApiEmployee, index = 0): Employee {
     color: colors[index % colors.length],
   };
 }
+function hasProjectWorkStarted(item: ApiProject) {
+  if (typeof item.hasStartedWork === "boolean") return item.hasStartedWork;
+  return (item.tasks || []).some(
+    (task) =>
+      task.progress > 0 ||
+      task.manualStatus !== "NOT_STARTED" ||
+      task.subtasks.some(
+        (detail) =>
+          detail.progress > 0 ||
+          detail.manualStatus !== "NOT_STARTED" ||
+          Boolean(detail.startedAt) ||
+          Number(detail.elapsedSeconds || 0) > 0 ||
+          detail.items.some((executionItem) => executionItem.done),
+      ),
+  );
+}
 function toProject(item: ApiProject): WorkspaceProject {
   return {
     id: item._id,
@@ -298,6 +345,7 @@ function toProject(item: ApiProject): WorkspaceProject {
     ),
     progress: item.progress || 0,
     totalTasks: item.totalTasks || 0,
+    hasStartedWork: hasProjectWorkStarted(item),
   };
 }
 function collectRunningWork(
@@ -307,8 +355,12 @@ function collectRunningWork(
   return apiProjects.flatMap((project) =>
     (project.tasks || []).flatMap((task) => {
       const work: RunningWorkEntry[] = [];
-      for (const detail of task.subtasks || []) {
-        if (detail.manualStatus !== "IN_PROGRESS") continue;
+      const details = task.subtasks || [];
+      const visibleDetails = details.filter(
+        (detail) =>
+          detail.manualStatus === "IN_PROGRESS" && detail.progress < 100,
+      );
+      for (const detail of visibleDetails) {
         const employeeId = detail.startedById || task.assigneeId;
         work.push({
           key: `${project._id}:detail:${detail._id}`,
@@ -319,6 +371,16 @@ function collectRunningWork(
           employeeName: employeeNameFor(employeeId),
           taskId: task._id,
           taskTitle: task.title,
+          assigneeId: task.assigneeId,
+          helperIds: task.helperIds || [],
+          status: detail.manualStatus,
+          priority: task.priority,
+          dueDate: task.dueDate,
+          startedAt: detail.startedAt,
+          firstStartedAt: detail.firstStartedAt || detail.startedAt,
+          elapsedSeconds: detail.elapsedSeconds || 0,
+          plannedDurationDays: detail.durationDays ?? task.durationDays,
+          progress: detail.progress,
           detailId: detail._id,
           detailTitle: detail.title,
         });
@@ -355,6 +417,16 @@ function shortDate(value?: string | null) {
       }).format(new Date(value))
     : "—";
 }
+function shortDateTime(value?: string | null) {
+  return value
+    ? new Intl.DateTimeFormat(intlLocale(), {
+        day: "numeric",
+        month: "short",
+        hour: "numeric",
+        minute: "2-digit",
+      }).format(new Date(value))
+    : "لم يبدأ بعد";
+}
 function statusColor(status: WorkStatus) {
   return status === "COMPLETED"
     ? "var(--success)"
@@ -368,6 +440,29 @@ function isOverdue(value: string | null | undefined, progress: number) {
     value! < new Date().toISOString().slice(0, 10) &&
     progress < 100
   );
+}
+function isCompletedProject(project: WorkspaceProject) {
+  return project.status === "COMPLETED" || project.progress >= 100;
+}
+function isProjectOverdue(project: WorkspaceProject) {
+  return (
+    project.status !== "ARCHIVED" &&
+    !isCompletedProject(project) &&
+    isOverdue(project.dueDate, project.progress)
+  );
+}
+function matchesProjectStatus(
+  project: WorkspaceProject,
+  status: ProjectStatusFilter,
+) {
+  if (status === "all") return true;
+  if (status === "archive") return project.status === "ARCHIVED";
+  if (project.status === "ARCHIVED") return false;
+  if (status === "completed") return isCompletedProject(project);
+  if (status === "overdue") return isProjectOverdue(project);
+  if (status === "new")
+    return !isCompletedProject(project) && !project.hasStartedWork;
+  return !isCompletedProject(project) && project.hasStartedWork;
 }
 
 export default function ProjectsPage() {
@@ -385,14 +480,15 @@ export default function ProjectsPage() {
   const [taskId, setTaskId] = useState("");
   const [subtaskId, setSubtaskId] = useState("");
   const [itemId, setItemId] = useState("");
-  const [filter, setFilter] = useState<"all" | CompanyKey | "archive">("all");
-  const [projectStatusFilter, setProjectStatusFilter] = useState<ProjectStatusFilter>("all");
+  const [filter, setFilter] = useState<"all" | CompanyKey>("all");
+  const [projectStatusFilter, setProjectStatusFilter] = useState<ProjectStatusFilter>("active");
   const [query, setQuery] = useState("");
   const [projectSort, setProjectSort] = useState<ProjectSort>("manual");
   const [taskQuery, setTaskQuery] = useState("");
   const [taskFilter, setTaskFilter] = useState<TaskFilter>("all");
   const [companyKeys, setCompanyKeys] = useState<CompanyKey[]>([]);
   const [level, setLevel] = useState(0);
+  const [expandedStep, setExpandedStep] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [workspaceLoading, setWorkspaceLoading] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -414,6 +510,7 @@ export default function ProjectsPage() {
   const [dragged, setDragged] = useState<{ entity: DragEntity; id: string } | null>(null);
   const draggedRef = useRef<{ entity: DragEntity; id: string } | null>(null);
   const workspaceRequestRef = useRef(0);
+  const catalogInitializedRef = useRef(false);
 
   function notify(message: string) {
     setToast(message);
@@ -431,6 +528,10 @@ export default function ProjectsPage() {
           if (typeof member !== "string") employeeNames.set(member._id, member.fullName || "");
         }
       }
+      setProjects((current) => [
+        ...active.map(toProject),
+        ...current.filter((project) => project.status === "ARCHIVED"),
+      ]);
       setRunningWork(collectRunningWork(active, (id) => employeeNames.get(id) || ""));
       setAssignedTasks(collectAssignedTasks(active, user?.role === "EMPLOYEE" ? user.id : undefined));
     } catch {
@@ -478,18 +579,52 @@ export default function ProjectsPage() {
       const company = params.get("c");
       if (company && organisations.some((entry) => entry.key === company))
         setFilter(company);
+      const linkedProjectId = params.get("p");
       const requested =
         preferredId ||
-        params.get("p") ||
+        linkedProjectId ||
         localStorage.getItem("spark-last-project") ||
         "";
-      setProjectId(
-        nextProjects.some((project) => project.id === requested)
-          ? requested
-          : nextProjects.find((project) => project.status !== "ARCHIVED")?.id ||
-              nextProjects[0]?.id ||
-              "",
+      const requestedProject = nextProjects.find(
+        (project) => project.id === requested,
       );
+      if (!catalogInitializedRef.current) {
+        const explicitlyRequestedProject = preferredId || linkedProjectId;
+        if (explicitlyRequestedProject && requestedProject) {
+          setProjectStatusFilter(
+            requestedProject.status === "ARCHIVED"
+              ? "archive"
+              : isCompletedProject(requestedProject)
+                ? "completed"
+                : isProjectOverdue(requestedProject)
+                  ? "overdue"
+                  : matchesProjectStatus(requestedProject, "active")
+                    ? "active"
+                    : matchesProjectStatus(requestedProject, "new")
+                      ? "new"
+                    : "all",
+          );
+          setProjectId(requestedProject.id);
+        } else {
+          setProjectStatusFilter("active");
+          setProjectId(
+            requestedProject && matchesProjectStatus(requestedProject, "active")
+              ? requestedProject.id
+              : nextProjects.find((project) =>
+                  matchesProjectStatus(project, "active"),
+                )?.id || "",
+          );
+        }
+        catalogInitializedRef.current = true;
+      } else {
+        setProjectId(
+          requestedProject?.id ||
+            nextProjects.find((project) =>
+              matchesProjectStatus(project, "active"),
+            )?.id ||
+            "",
+        );
+      }
     } catch (caught) {
       showError(caught, "تعذر تحميل المشاريع");
     } finally {
@@ -652,19 +787,8 @@ export default function ProjectsPage() {
       projects
         .filter(
           (entry) =>
-            (filter === "all" ||
-              filter === "archive" ||
-              entry.company === filter) &&
-            (filter === "archive"
-              ? entry.status === "ARCHIVED"
-              : entry.status !== "ARCHIVED") &&
-            (filter === "archive" ||
-              projectStatusFilter === "all" ||
-              (projectStatusFilter === "active" && entry.status === "ACTIVE") ||
-              (projectStatusFilter === "completed" &&
-                (entry.status === "COMPLETED" || entry.progress === 100)) ||
-              (projectStatusFilter === "overdue" &&
-                isOverdue(entry.dueDate, entry.progress))) &&
+            (filter === "all" || entry.company === filter) &&
+            matchesProjectStatus(entry, projectStatusFilter) &&
             `${entry.name} ${entry.client} ${companyMeta(entry.company).name}`
               .toLocaleLowerCase("ar")
               .includes(query.trim().toLocaleLowerCase("ar")),
@@ -695,22 +819,23 @@ export default function ProjectsPage() {
           activeProjects.length,
       )
     : 0;
-  const companyProjects = activeProjects.filter(
-    (entry) => filter === "all" || filter === "archive" || entry.company === filter,
+  const companyProjects = projects.filter(
+    (entry) => filter === "all" || entry.company === filter,
   );
   const activeProjectCount = companyProjects.filter(
-    (entry) => entry.status === "ACTIVE",
+    (entry) => matchesProjectStatus(entry, "active"),
+  ).length;
+  const newProjectCount = companyProjects.filter(
+    (entry) => matchesProjectStatus(entry, "new"),
   ).length;
   const completedProjectCount = companyProjects.filter(
-    (entry) => entry.status === "COMPLETED" || entry.progress === 100,
+    (entry) => matchesProjectStatus(entry, "completed"),
   ).length;
-  const overdueProjectCount = companyProjects.filter((entry) =>
-    isOverdue(entry.dueDate, entry.progress),
+  const overdueProjectCount = companyProjects.filter(
+    (entry) => matchesProjectStatus(entry, "overdue"),
   ).length;
-  const archivedProjectCount = projects.filter(
-    (entry) =>
-      entry.status === "ARCHIVED" &&
-      (filter === "all" || filter === "archive" || entry.company === filter),
+  const archivedProjectCount = companyProjects.filter(
+    (entry) => matchesProjectStatus(entry, "archive"),
   ).length;
   const visibleEmployeeTasks = useMemo(
     () =>
@@ -745,8 +870,7 @@ export default function ProjectsPage() {
     selectedFilter = filter,
   ) {
     const params = new URLSearchParams();
-    if (selectedFilter !== "all" && selectedFilter !== "archive")
-      params.set("c", selectedFilter);
+    if (selectedFilter !== "all") params.set("c", selectedFilter);
     if (values.p) params.set("p", values.p);
     if (values.e) params.set("e", values.e);
     if (values.t) params.set("t", values.t);
@@ -773,13 +897,10 @@ export default function ProjectsPage() {
   }
   function chooseFilter(nextFilter: typeof filter) {
     setFilter(nextFilter);
-    setProjectStatusFilter("all");
     const keepProject = Boolean(
       project &&
-      (nextFilter === "archive"
-        ? project.status === "ARCHIVED"
-        : project.status !== "ARCHIVED" &&
-          (nextFilter === "all" || project.company === nextFilter)),
+      (nextFilter === "all" || project.company === nextFilter) &&
+      matchesProjectStatus(project, projectStatusFilter),
     );
     if (!keepProject) {
       clearWorkspaceSelection(true);
@@ -798,27 +919,20 @@ export default function ProjectsPage() {
       );
   }
   function chooseProjectStatus(nextStatus: ProjectStatusFilter) {
-    const nextCompanyFilter = filter === "archive" ? "all" : filter;
     const selectedProjectMatches = Boolean(
       project &&
-        project.status !== "ARCHIVED" &&
-        (nextCompanyFilter === "all" || project.company === nextCompanyFilter) &&
-        (nextStatus === "all" ||
-          (nextStatus === "active" && project.status === "ACTIVE") ||
-          (nextStatus === "completed" &&
-            (project.status === "COMPLETED" || project.progress === 100)) ||
-          (nextStatus === "overdue" && isOverdue(project.dueDate, project.progress))),
+        (filter === "all" || project.company === filter) &&
+        matchesProjectStatus(project, nextStatus),
     );
     setProjectStatusFilter(nextStatus);
-    if (filter === "archive") setFilter("all");
     if (!selectedProjectMatches) {
       clearWorkspaceSelection(true);
       setLevel(0);
-      syncUrl({}, nextCompanyFilter);
+      syncUrl({}, filter);
     } else {
       syncUrl(
         { p: projectId, e: employeeId, t: task?._id, s: subtask?._id, i: item?._id },
-        nextCompanyFilter,
+        filter,
       );
     }
   }
@@ -854,7 +968,7 @@ export default function ProjectsPage() {
     syncUrl({ p: projectId, e: id, t: next?._id, s: next?.subtasks[0]?._id });
   }
   function navigateToRunningWork(
-    entry: RunningWorkEntry,
+    entry: WorkNavigationEntry,
     destination: "project" | "task" | "detail",
   ) {
     const nextLevel = destination === "project" ? 1 : destination === "task" ? 3 : 4;
@@ -910,6 +1024,10 @@ export default function ProjectsPage() {
   }
   const columnClass = (index: number) =>
     `${level === index ? "flex" : "hidden"} md:flex`;
+  function toggleExpandedStep(index: number) {
+    setLevel(index);
+    setExpandedStep((current) => current === index ? null : index);
+  }
 
   async function saveProject(draft: ProjectDraft) {
     setBusy(true);
@@ -937,6 +1055,7 @@ export default function ProjectsPage() {
       setProjectModal(false);
       setEditingProject(null);
       await loadCatalog(result._id);
+      if (!wasEditing) setProjectStatusFilter("new");
       await loadWorkspace(result._id);
       notify(wasEditing ? "تم تحديث المشروع" : "تم إنشاء المشروع");
     } catch (caught) {
@@ -946,7 +1065,7 @@ export default function ProjectsPage() {
     }
   }
   async function quickAddProject(name: string) {
-    const company = filter !== "all" && filter !== "archive" && allowedCompanies.includes(filter)
+    const company = filter !== "all" && allowedCompanies.includes(filter)
       ? filter
       : allowedCompanies[0];
     if (!company || busy) return;
@@ -957,6 +1076,7 @@ export default function ProjectsPage() {
         body: JSON.stringify({ name, company, memberIds: [] }),
       });
       await loadCatalog(result._id);
+      setProjectStatusFilter("new");
       await loadWorkspace(result._id);
       notify("تمت إضافة المشروع");
     } catch (caught) {
@@ -993,7 +1113,8 @@ export default function ProjectsPage() {
         body: JSON.stringify({ status }),
       });
       await loadCatalog(target.id);
-      setFilter(status === "ARCHIVED" ? "archive" : "all");
+      setFilter("all");
+      setProjectStatusFilter(status === "ARCHIVED" ? "archive" : "all");
       notify(
         status === "ARCHIVED" ? "تمت أرشفة المشروع" : "تمت استعادة المشروع",
       );
@@ -1014,6 +1135,7 @@ export default function ProjectsPage() {
         body: JSON.stringify({ status }),
       });
       await loadCatalog(project.id);
+      setProjectStatusFilter(status === "COMPLETED" ? "completed" : "all");
       await loadWorkspace(project.id);
       notify(
         status === "COMPLETED"
@@ -1158,7 +1280,7 @@ export default function ProjectsPage() {
         setTaskId(createdTask._id);
         setSubtaskId(createdTask.subtasks[0]?._id || "");
         setItemId("");
-        setLevel(3);
+        setLevel(2);
         syncUrl({ p: project.id, e: employeeId, t: createdTask._id, s: createdTask.subtasks[0]?._id });
       }
       notify("تمت إضافة المهمة");
@@ -1246,7 +1368,7 @@ export default function ProjectsPage() {
       if (createdSubtask) {
         setSubtaskId(createdSubtask._id);
         setItemId("");
-        setLevel(4);
+        setLevel(3);
         syncUrl({ p: project.id, e: employeeId, t: task._id, s: createdSubtask._id });
       }
       notify("تمت إضافة التفصيل");
@@ -1274,6 +1396,50 @@ export default function ProjectsPage() {
       await refreshRunningWork();
       notify("تم إيقاف المرحلة مؤقتًا");
     } catch (caught) { showError(caught, "تعذر إيقاف المرحلة مؤقتًا"); } finally { setBusy(false); }
+  }
+  async function finishSubtask(target: SubtaskNode) {
+    if (!project || busy || target.manualStatus !== "IN_PROGRESS") return;
+    setBusy(true);
+    try {
+      applyWorkspace(
+        await apiRequest<WorkspaceTree>(`/subtasks/${target._id}`, {
+          method: "PATCH",
+          body: JSON.stringify({
+            projectId: project.id,
+            manualStatus: "COMPLETED",
+          }),
+        }),
+      );
+      await refreshRunningWork();
+      notify("تم إنهاء التفصيل واعتماد جميع بنود التنفيذ");
+    } catch (caught) {
+      showError(caught, "تعذر إنهاء التفصيل");
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function toggleRunningWork(entry: RunningWorkEntry) {
+    if (!entry.detailId || busy || entry.status !== "IN_PROGRESS") return;
+    setBusy(true);
+    try {
+      const updated = await apiRequest<WorkspaceTree>(
+        `/subtasks/${entry.detailId}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            projectId: entry.projectId,
+            manualStatus: "PAUSED",
+          }),
+        },
+      );
+      if (entry.projectId === projectId) applyWorkspace(updated);
+      await refreshRunningWork();
+      notify("تم إيقاف العمل مؤقتًا وحفظ المدة");
+    } catch (caught) {
+      showError(caught, "تعذر إيقاف العمل مؤقتًا");
+    } finally {
+      setBusy(false);
+    }
   }
   async function receiveTask(target: TaskNode) {
     if (!project || busy || !user || target.receivedByIds?.includes(user.id)) return;
@@ -1569,12 +1735,11 @@ export default function ProjectsPage() {
             {([
               { key: "all", label: "كل الشركات" },
               ...companyKeys.map((key) => ({ key, label: companyMeta(key).name })),
-              { key: "archive", label: "الأرشيف" },
-            ] as Array<{ key: "all" | "archive" | CompanyKey; label: string }>).map(({ key, label }) => (
+            ] as Array<{ key: "all" | CompanyKey; label: string }>).map(({ key, label }) => (
               <button key={key} onClick={() => chooseFilter(key)} className={`chip h-7 whitespace-nowrap gap-1.5 px-2.5 text-[10px] ${filter === key ? "chip-active" : ""}`}>
-                {key === "archive" ? <Archive size={12} /> : key !== "all" ? <span className="h-2 w-2 rounded-full" style={{ background: companyMeta(key).color }} /> : <FolderKanban size={12} />}
+                {key !== "all" ? <span className="h-2 w-2 rounded-full" style={{ background: companyMeta(key).color }} /> : <FolderKanban size={12} />}
                 {label}
-                {key !== "archive" && <span className="opacity-70">{key === "all" ? activeProjects.length : projects.filter((entry) => entry.company === key && entry.status !== "ARCHIVED").length}</span>}
+                <span className="opacity-70">{key === "all" ? projects.length : projects.filter((entry) => entry.company === key).length}</span>
               </button>
             ))}
             <label className="ms-auto flex items-center gap-1.5 text-[10px]" style={{ color: "var(--muted)" }}>
@@ -1588,20 +1753,21 @@ export default function ProjectsPage() {
             </label>
           </div>
 
-          <div className="mt-2 grid grid-cols-2 gap-1.5 sm:grid-cols-3 lg:grid-cols-5">
+          <div className="mt-2 grid grid-cols-2 gap-1.5 sm:grid-cols-3 lg:grid-cols-6">
             {([
               { key: "all", label: "كل المشاريع", count: companyProjects.length, icon: <FolderKanban size={14} />, color: "var(--primary)" },
+              { key: "new", label: "جديد", count: newProjectCount, icon: <Sparkles size={14} />, color: "var(--primary)" },
               { key: "active", label: "قيد التنفيذ", count: activeProjectCount, icon: <Play size={14} />, color: "var(--warning)" },
               { key: "completed", label: "مكتملة", count: completedProjectCount, icon: <CheckCircle2 size={14} />, color: "var(--success)" },
               { key: "overdue", label: "متأخرة", count: overdueProjectCount, icon: <AlertTriangle size={14} />, color: "var(--danger)" },
               { key: "archive", label: "مؤرشفة", count: archivedProjectCount, icon: <Archive size={14} />, color: "var(--muted)" },
             ] as const).map((card) => {
-              const selected = card.key === "archive" ? filter === "archive" : filter !== "archive" && projectStatusFilter === card.key;
+              const selected = projectStatusFilter === card.key;
               return (
                 <button
                   key={card.key}
                   type="button"
-                  onClick={() => card.key === "archive" ? chooseFilter("archive") : chooseProjectStatus(card.key)}
+                  onClick={() => chooseProjectStatus(card.key)}
                   aria-pressed={selected}
                   className="flex min-w-0 items-center gap-2 rounded-xl border px-2.5 py-2 text-start transition hover:-translate-y-px hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand sm:px-3"
                   style={{ borderColor: selected ? `color-mix(in srgb, ${card.color} 35%, var(--border))` : "var(--border)", background: selected ? `color-mix(in srgb, ${card.color} 8%, var(--surface))` : "var(--surface)" }}
@@ -1615,7 +1781,7 @@ export default function ProjectsPage() {
           </div>
         </div>
 
-        <div className={`mx-2 mt-1.5 grid min-w-0 gap-1.5 ${user?.role === "EMPLOYEE" ? "grid-cols-2" : "grid-cols-1"}`}>
+        <div className={`mx-2 mt-1.5 grid min-w-0 gap-1.5 ${user?.role === "EMPLOYEE" ? "grid-cols-1 lg:grid-cols-2" : "grid-cols-1"}`}>
           {user?.role === "EMPLOYEE" && <AssignedTasksSummary
             entries={assignedTasks}
             loading={loading}
@@ -1635,7 +1801,17 @@ export default function ProjectsPage() {
           <RunningWorkSummary
             entries={runningWork}
             loading={loading}
+            busy={busy}
+            canControl={(entry) =>
+              Boolean(
+                canManage ||
+                  (user &&
+                    (entry.assigneeId === user.id ||
+                      entry.helperIds.includes(user.id))),
+              )
+            }
             onNavigate={navigateToRunningWork}
+            onToggle={toggleRunningWork}
           />
         </div>
 
@@ -1659,10 +1835,16 @@ export default function ProjectsPage() {
         />
 
         <div className="project-columns-wrap w-full max-w-full overflow-x-hidden px-2 pb-2">
-          <div className="project-columns min-h-[560px] min-w-0 gap-1.5">
+          <div
+            className="project-columns min-h-[560px] min-w-0 gap-1.5"
+            data-expanded-step={expandedStep === null ? undefined : expandedStep}
+          >
             <WorkspaceColumn
               index={1}
               active={level === 0}
+              expanded={expandedStep === 0}
+              collapsed={expandedStep !== null && expandedStep !== 0}
+              onToggleExpand={() => toggleExpandedStep(0)}
               title="المشاريع"
               count={visibleProjects.length}
               className={columnClass(0)}
@@ -1716,6 +1898,9 @@ export default function ProjectsPage() {
             <WorkspaceColumn
               index={2}
               active={level === 1}
+              expanded={expandedStep === 1}
+              collapsed={expandedStep !== null && expandedStep !== 1}
+              onToggleExpand={() => toggleExpandedStep(1)}
               title="الفريق"
               count={members.length}
               className={columnClass(1)}
@@ -1793,6 +1978,9 @@ export default function ProjectsPage() {
             <WorkspaceColumn
               index={3}
               active={level === 2}
+              expanded={expandedStep === 2}
+              collapsed={expandedStep !== null && expandedStep !== 2}
+              onToggleExpand={() => toggleExpandedStep(2)}
               title="المهام"
               count={visibleEmployeeTasks.length}
               className={columnClass(2)}
@@ -1857,6 +2045,9 @@ export default function ProjectsPage() {
             <WorkspaceColumn
               index={4}
               active={level === 3}
+              expanded={expandedStep === 3}
+              collapsed={expandedStep !== null && expandedStep !== 3}
+              onToggleExpand={() => toggleExpandedStep(3)}
               title="التفاصيل"
               count={task?.subtasks.length || 0}
               className={columnClass(3)}
@@ -1893,6 +2084,7 @@ export default function ProjectsPage() {
                     }}
                     onStart={() => void startSubtask(entry)}
                     onPause={() => void pauseSubtask(entry)}
+                    onFinish={() => void finishSubtask(entry)}
                     onDelete={() => void deleteSubtask(entry)}
                     dragging={dragged?.entity === "subtask" && dragged.id === entry._id}
                     onDragStart={(event) => beginDrag(event, "subtask", entry._id)}
@@ -1911,6 +2103,9 @@ export default function ProjectsPage() {
             <WorkspaceColumn
               index={5}
               active={level === 4}
+              expanded={expandedStep === 4}
+              collapsed={expandedStep !== null && expandedStep !== 4}
+              onToggleExpand={() => toggleExpandedStep(4)}
               title="قائمة التنفيذ"
               count={subtask?.items.length || 0}
               className={columnClass(4)}
@@ -1973,15 +2168,13 @@ export default function ProjectsPage() {
                       >
                         {entry.done && <Check size={12} strokeWidth={3} />}
                       </button>
-                      <button
-                        onClick={() => chooseItem(entry._id)}
-                        className={`min-w-0 flex-1 text-start text-xs ${entry.done ? "line-through opacity-60" : ""}`}
-                      >
-                        <FullNameTooltip
-                          text={entry.text}
-                          className="block truncate"
-                        />
-                      </button>
+                      <TranslatableText
+                        text={entry.text}
+                        compact
+                        onTextClick={() => chooseItem(entry._id)}
+                        className={`flex min-w-0 flex-1 text-start text-xs ${entry.done ? "line-through opacity-60" : ""}`}
+                        textClassName="block truncate"
+                      />
                       {entry.durationDays ? <span className="shrink-0 text-[9px]" style={{ color: "var(--muted)" }}>{entry.durationDays} أيام</span> : null}
                       {entry.attachments > 0 && (
                         <span
@@ -2032,13 +2225,15 @@ export default function ProjectsPage() {
             <WorkspaceColumn
               index={6}
               active={level === 5}
+              expanded={expandedStep === 5}
+              collapsed={expandedStep !== null && expandedStep !== 5}
+              onToggleExpand={() => toggleExpandedStep(5)}
               title="الإنجاز والتسليمات"
               count={selectedDeliveries.length}
               className={columnClass(5)}
             >
               {task ? (
                 <DeliveryPanel
-                  task={task}
                   item={item}
                   deliveries={selectedDeliveries}
                   memberMap={memberMap}
@@ -2046,7 +2241,6 @@ export default function ProjectsPage() {
                   canManage={Boolean(canManage)}
                   currentUserId={user?.id || ""}
                   busy={busy}
-                  onCancelItem={() => setItemId("")}
                   onDelete={deleteDelivery}
                   onSubmit={addDelivery}
                 />
@@ -2205,10 +2399,11 @@ function FullNameTooltip({ text, className = "" }: { text: string; className?: s
 }
 
 function ProjectBrief({ project }: { project: WorkspaceProject }) {
-  const overdue = isOverdue(project.dueDate, project.progress);
+  const completed = isCompletedProject(project);
+  const overdue = isProjectOverdue(project);
   return (
     <section
-      className="mx-2 mt-1 flex min-h-9 flex-wrap items-center gap-x-1.5 gap-y-1 rounded-lg border px-1.5 py-1"
+      className="mx-2 mt-1 flex min-h-9 flex-nowrap items-center gap-1.5 overflow-x-auto rounded-lg border px-1.5 py-1"
       style={{
         borderColor: overdue
           ? "color-mix(in srgb, var(--danger) 35%, var(--border))"
@@ -2221,16 +2416,18 @@ function ProjectBrief({ project }: { project: WorkspaceProject }) {
         style={{ background: companyMeta(project.company).color }}
       />
       <h3 className="min-w-[120px] flex-1 text-xs font-medium">
-        <FullNameTooltip text={project.name} className="block truncate" />
+        <TranslatableText text={project.name} compact className="flex w-full" textClassName="block truncate" />
       </h3>
       <span
-        className={`status ${project.status === "COMPLETED" || project.progress === 100 ? "status-success" : overdue ? "status-danger" : "status-warning"}`}
+        className={`status ${completed ? "status-success" : overdue ? "status-danger" : project.hasStartedWork ? "status-warning" : "status-neutral"}`}
       >
-        {project.status === "COMPLETED" || project.progress === 100
+        {completed
           ? "مكتمل"
           : overdue
             ? "متأخر"
-            : "نشط"}
+            : project.hasStartedWork
+              ? "قيد التنفيذ"
+              : "جديد"}
       </span>
       <div className="flex w-24 items-center gap-1.5">
         <Progress
@@ -2321,63 +2518,256 @@ function AssignedTasksSummary({
 function RunningWorkSummary({
   entries,
   loading,
+  busy,
+  canControl,
   onNavigate,
+  onToggle,
 }: {
   entries: RunningWorkEntry[];
   loading: boolean;
-  onNavigate: (entry: RunningWorkEntry, destination: "project" | "task" | "detail") => void;
+  busy: boolean;
+  canControl: (entry: RunningWorkEntry) => boolean;
+  onNavigate: (entry: WorkNavigationEntry, destination: "project" | "task" | "detail") => void;
+  onToggle: (entry: RunningWorkEntry) => void;
 }) {
+  const [expanded, setExpanded] = useState(false);
+  const activeCount = entries.filter(
+    (entry) => entry.status === "IN_PROGRESS",
+  ).length;
   return (
-    <details className="group min-w-0 overflow-hidden rounded-lg border" style={{ borderColor: "var(--border)", background: "var(--surface)" }}>
-      <summary className="flex min-h-9 min-w-0 cursor-pointer list-none items-center gap-1 px-1.5 [&::-webkit-details-marker]:hidden sm:gap-1.5 sm:px-2">
-        <CircleStop size={13} className="shrink-0" color="var(--warning)" />
-        <span className="min-w-0 truncate text-[9px] font-semibold sm:text-[11px]">العمل الجاري الآن</span>
-        <span className="ms-auto shrink-0 rounded-full px-1 py-0.5 text-[9px] font-medium sm:px-1.5" style={{ color: "var(--warning)", background: "color-mix(in srgb, var(--warning) 12%, var(--surface))" }}>{entries.length}</span>
-        <ChevronDown size={12} className="shrink-0 transition-transform group-open:rotate-180 sm:h-[13px] sm:w-[13px]" color="var(--muted)" />
+    <details
+      open={expanded}
+      onToggle={(event) => setExpanded(event.currentTarget.open)}
+      className="group min-w-0 overflow-hidden rounded-xl border shadow-sm"
+      style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+    >
+      <summary className="flex min-h-11 min-w-0 cursor-pointer list-none items-center gap-2 px-2.5 [&::-webkit-details-marker]:hidden sm:px-3">
+        <span
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg"
+          style={{
+            color: "var(--warning)",
+            background:
+              "color-mix(in srgb, var(--warning) 12%, var(--surface))",
+          }}
+        >
+          <CircleStop size={15} />
+        </span>
+        <div className="min-w-0">
+          <span className="block truncate text-[11px] font-semibold">
+            العمل الجاري الآن
+          </span>
+          <span className="block truncate text-[9px]" style={{ color: "var(--muted)" }}>
+            متابعة الوقت والتحكم في العمل مباشرة
+          </span>
+        </div>
+        <div className="ms-auto flex shrink-0 items-center gap-1">
+          {activeCount > 0 && (
+            <span className="flex items-center gap-1 rounded-full px-1.5 py-1 text-[9px] font-medium" style={{ color: "var(--success)", background: "color-mix(in srgb, var(--success) 10%, var(--surface))" }}>
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full" style={{ background: "var(--success)" }} />
+              {activeCount} نشط
+            </span>
+          )}
+          <ChevronDown size={13} className="transition-transform group-open:rotate-180" color="var(--muted)" />
+        </div>
       </summary>
       {entries.length ? (
-        <div className="grid max-h-36 min-w-0 grid-cols-1 gap-1 border-t p-1.5 lg:grid-cols-2" style={{ borderColor: "var(--border)" }}>
+        <div
+          className="grid max-h-[22rem] min-w-0 grid-cols-1 gap-1.5 overflow-y-auto border-t p-1.5 md:grid-cols-2 2xl:grid-cols-3"
+          style={{ borderColor: "var(--border)", background: "var(--surface-2)" }}
+        >
           {entries.map((entry) => (
-            <button
+            <RunningWorkCard
               key={entry.key}
-              type="button"
-              onClick={() => onNavigate(entry, entry.detailId ? "detail" : "task")}
-              aria-label={`فتح التفصيلة الجارية ${entry.detailTitle || entry.taskTitle}`}
-              className="min-w-0 rounded-lg border px-2 py-1.5 text-start transition-colors hover:border-[var(--primary)] hover:bg-[var(--surface-3)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
-              style={{ borderColor: "var(--border)", background: "var(--surface-2)" }}
-            >
-              <div className="mb-1 flex min-w-0 items-center gap-1.5">
-                <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[9px] font-semibold" style={{ color: "var(--primary)", background: "color-mix(in srgb, var(--primary) 12%, var(--surface))" }}>
-                  {(entry.employeeName || "م").trim().slice(0, 1)}
-                </span>
-                <span className="min-w-0 flex-1 truncate text-[10px] font-medium">{entry.employeeName || "موظف"}</span>
-                <span className="flex shrink-0 items-center gap-1 text-[9px]" style={{ color: "var(--warning)" }}><span className="h-1.5 w-1.5 animate-pulse rounded-full" style={{ background: "var(--warning)" }} />يعمل الآن</span>
-              </div>
-              <div className="flex min-w-0 items-center gap-1 text-[10px]">
-                <span className="min-w-0 max-w-[42%] truncate">
-                  <FullNameTooltip text={entry.projectName} className="block truncate" />
-                </span>
-                <ChevronLeft size={11} className="shrink-0" color="var(--muted)" />
-                <span className="min-w-0 flex-1 truncate font-medium">
-                  <FullNameTooltip text={entry.taskTitle} className="block truncate" />
-                </span>
-              </div>
-              {entry.detailId && entry.detailTitle ? (
-                <span className="mt-1 block w-full truncate text-[9px]" style={{ color: "var(--muted)" }}>
-                  <span className="me-1" aria-hidden="true">↳</span><FullNameTooltip text={entry.detailTitle} className="inline-block max-w-[90%] truncate align-bottom" />
-                </span>
-              ) : null}
-            </button>
+              entry={entry}
+              busy={busy}
+              canControl={canControl(entry)}
+              onNavigate={onNavigate}
+              onToggle={onToggle}
+            />
           ))}
         </div>
       ) : (
-        <div className="flex items-center gap-1.5 border-t px-2 py-2 text-[10px]" style={{ color: "var(--muted)", background: "var(--surface-2)", borderColor: "var(--border)" }}>
-          {loading ? <Loader2 size={12} className="animate-spin" /> : <CheckCircle2 size={12} />}
+        <div className="flex min-h-16 items-center justify-center gap-2 border-t px-3 py-3 text-[10px]" style={{ color: "var(--muted)", background: "var(--surface-2)", borderColor: "var(--border)" }}>
+          {loading ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
           {loading ? "جارٍ التحميل…" : "لا يوجد عمل جارٍ"}
         </div>
       )}
     </details>
   );
+}
+
+function RunningWorkCard({
+  entry,
+  busy,
+  canControl,
+  onNavigate,
+  onToggle,
+}: {
+  entry: RunningWorkEntry;
+  busy: boolean;
+  canControl: boolean;
+  onNavigate: (entry: WorkNavigationEntry, destination: "project" | "task" | "detail") => void;
+  onToggle: (entry: RunningWorkEntry) => void;
+}) {
+  const deadline = runningWorkDeadline(entry.dueDate);
+  return (
+    <article
+      className="relative min-w-0 overflow-hidden rounded-lg border transition hover:-translate-y-px hover:shadow-sm"
+      style={{
+        borderColor: "color-mix(in srgb, var(--success) 28%, var(--border))",
+        background:
+          "linear-gradient(145deg, color-mix(in srgb, var(--surface) 96%, var(--primary)), var(--surface))",
+      }}
+    >
+      <span
+        className="absolute inset-x-0 top-0 h-0.5"
+        style={{
+          background: "linear-gradient(90deg, var(--success), var(--primary))",
+        }}
+      />
+      <div className="p-2 pt-2.5">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <span
+            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg text-[9px] font-bold"
+            style={{
+              color: "var(--primary)",
+              background:
+                "color-mix(in srgb, var(--primary) 12%, var(--surface))",
+            }}
+          >
+            {(entry.employeeName || "م").trim().slice(0, 1)}
+          </span>
+          <div className="min-w-0 flex-1">
+            <span className="block truncate text-[9px] font-semibold">
+              {entry.employeeName || "موظف"}
+            </span>
+          </div>
+          <span
+            className="flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[8px] font-semibold"
+            style={{
+              color: "var(--success)",
+              background: "color-mix(in srgb, var(--success) 10%, var(--surface))",
+            }}
+          >
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full" style={{ background: "currentColor" }} />
+            يعمل الآن
+          </span>
+        </div>
+
+        <div className="mt-1.5 min-w-0">
+          <div className="flex min-w-0 items-center gap-1 text-[8px]" style={{ color: "var(--muted)" }}>
+            <button type="button" className="truncate hover:text-brand" onClick={() => onNavigate(entry, "project")}>
+              <FullNameTooltip text={entry.projectName} className="block truncate" />
+            </button>
+            <ChevronLeft size={10} className="shrink-0" />
+            <button type="button" className="truncate hover:text-brand" onClick={() => onNavigate(entry, "task")}>
+              <FullNameTooltip text={entry.taskTitle} className="block truncate" />
+            </button>
+          </div>
+          <button
+            type="button"
+            onClick={() => onNavigate(entry, entry.detailId ? "detail" : "task")}
+            className="mt-0.5 block w-full truncate text-start text-[11px] font-semibold hover:text-brand"
+          >
+            <FullNameTooltip text={entry.detailTitle || entry.taskTitle} className="block truncate" />
+          </button>
+        </div>
+
+        <div className="mt-1.5 grid grid-cols-3 gap-1">
+          <WorkMetric icon={<Play size={11} />} label="بدأت" value={shortDateTime(entry.firstStartedAt || entry.startedAt)} />
+          <WorkMetric icon={<Clock size={11} />} label="المستغرق" value={<RunningWorkTimer entry={entry} />} accent />
+          <WorkMetric icon={<CalendarDays size={11} />} label="الموعد" value={deadline.label} danger={deadline.danger} />
+        </div>
+
+        <div className="mt-1.5 flex items-center gap-1.5">
+          <div className="min-w-0 flex-1">
+            <div className="mb-0.5 flex items-center justify-between text-[7px]" style={{ color: "var(--muted)" }}>
+              <span>إنجاز التفصيل</span>
+              <span>{entry.progress}%</span>
+            </div>
+            <Progress value={entry.progress} danger={deadline.danger} />
+          </div>
+          {entry.plannedDurationDays ? (
+            <span className="shrink-0 rounded px-1 py-0.5 text-[7px]" style={{ color: "var(--muted)", background: "var(--surface-3)" }}>
+              مخطط: {entry.plannedDurationDays} يوم
+            </span>
+          ) : null}
+        </div>
+
+        <div className="mt-1.5 flex items-center gap-1 border-t pt-1.5" style={{ borderColor: "var(--border)" }}>
+          <button type="button" className="btn h-6 min-w-0 flex-1 gap-1 px-1.5 text-[8px]" onClick={() => onNavigate(entry, entry.detailId ? "detail" : "task")}>
+            <ExternalLink size={11} /> فتح التفاصيل
+          </button>
+          {canControl && (
+            <button
+              type="button"
+              className="btn h-6 shrink-0 gap-1 px-1.5 text-[8px]"
+              disabled={busy}
+              onClick={() => onToggle(entry)}
+            >
+              {busy ? <Loader2 size={11} className="animate-spin" /> : <Pause size={11} />}
+              إيقاف مؤقت
+            </button>
+          )}
+        </div>
+      </div>
+    </article>
+  );
+}
+
+function WorkMetric({
+  icon,
+  label,
+  value,
+  accent = false,
+  danger = false,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: React.ReactNode;
+  accent?: boolean;
+  danger?: boolean;
+}) {
+  return (
+    <div className="min-w-0 rounded-md border px-1 py-1" style={{ borderColor: "var(--border)", background: "var(--surface-2)" }}>
+      <span className="flex items-center gap-0.5 text-[7px]" style={{ color: danger ? "var(--danger)" : accent ? "var(--success)" : "var(--muted)" }}>
+        {icon}{label}
+      </span>
+      <span className="block truncate text-[8px] font-semibold" style={{ color: danger ? "var(--danger)" : "var(--text)" }}>
+        {value}
+      </span>
+    </div>
+  );
+}
+
+function RunningWorkTimer({ entry }: { entry: RunningWorkEntry }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (entry.status !== "IN_PROGRESS" || !entry.startedAt) return;
+    const interval = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(interval);
+  }, [entry.status, entry.startedAt]);
+  const seconds = Math.max(
+    0,
+    entry.elapsedSeconds +
+      (entry.status === "IN_PROGRESS" && entry.startedAt
+        ? Math.floor((now - new Date(entry.startedAt).getTime()) / 1000)
+        : 0),
+  );
+  return <span dir="rtl">{formatDuration(seconds)}</span>;
+}
+
+function runningWorkDeadline(value?: string | null) {
+  if (!value) return { label: "بدون موعد", danger: false };
+  const due = new Date(value);
+  const today = new Date();
+  const dueDay = new Date(due.getFullYear(), due.getMonth(), due.getDate());
+  const todayDay = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const days = Math.round((dueDay.getTime() - todayDay.getTime()) / 86_400_000);
+  if (days < 0) return { label: `متأخر ${Math.abs(days)} يوم`, danger: true };
+  if (days === 0) return { label: "اليوم", danger: false };
+  if (days === 1) return { label: "غدًا", danger: false };
+  return { label: `${shortDate(value)} · ${days} يوم`, danger: false };
 }
 
 function TaskToolbar({
@@ -2468,9 +2858,16 @@ function TaskRow({
         color: selected ? "var(--workspace-active-text)" : "var(--text)",
       }}
     >
-      <button
-        type="button"
+      <div
+        role="button"
+        tabIndex={0}
         onClick={onSelect}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            onSelect();
+          }
+        }}
         className="flex w-full items-start gap-2 px-2.5 py-2 text-start outline-none hover:bg-[var(--surface-2)] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand"
       >
         <span
@@ -2483,7 +2880,7 @@ function TaskRow({
         />
         {canManage && <GripVertical className="shrink-0 cursor-grab" size={14} color="var(--muted)" />}
         <span className="min-w-0 flex-1 text-xs font-medium leading-5">
-          <FullNameTooltip text={task.title} className="line-clamp-2" />
+          <TranslatableText text={task.title} compact className="flex w-full" textClassName="line-clamp-2" />
           <span
             className="mt-0.5 flex items-center gap-1 text-[9px] font-normal"
             style={{
@@ -2511,7 +2908,12 @@ function TaskRow({
         <span className="w-7 text-left text-[10px] font-medium">
           {task.progress}%
         </span>
-      </button>
+      </div>
+      {selected && task.description && (
+        <div className="mx-2.5 border-t py-1.5" style={{ borderColor: "color-mix(in srgb, var(--primary) 15%, transparent)" }}>
+          <TranslatableText text={task.description} multiline className="w-full text-[10px] leading-5" />
+        </div>
+      )}
       {selected && (
         <div
           className="mx-2.5 flex items-center gap-1 border-t py-1.5"
@@ -2558,6 +2960,7 @@ function SubtaskRow({
   onEdit,
   onStart,
   onPause,
+  onFinish,
   onDelete,
   dragging,
   onDragStart,
@@ -2574,13 +2977,14 @@ function SubtaskRow({
   onEdit: () => void;
   onStart: () => void;
   onPause: () => void;
+  onFinish: () => void;
   onDelete: () => void;
   dragging: boolean;
   onDragStart: (event: React.DragEvent<HTMLDivElement>) => void;
   onDragEnd: () => void;
   onDrop: (event: React.DragEvent<HTMLDivElement>) => void;
 }) {
-  const canResume = subtask.manualStatus === "PAUSED" || Boolean(subtask.elapsedSeconds);
+  const canResume = subtask.manualStatus === "PAUSED";
   return (
     <div draggable={canManage} onDragStart={onDragStart} onDragEnd={onDragEnd} onDragOver={(event) => event.preventDefault()} onDrop={onDrop}
       className="border-b"
@@ -2591,9 +2995,16 @@ function SubtaskRow({
         color: selected ? "var(--workspace-active-text)" : "var(--text)",
       }}
     >
-      <button
-        type="button"
+      <div
+        role="button"
+        tabIndex={0}
         onClick={onSelect}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            onSelect();
+          }
+        }}
         className="flex w-full items-start gap-2 px-2.5 py-2 text-start outline-none hover:bg-[var(--surface-2)] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand"
       >
         <span
@@ -2602,17 +3013,17 @@ function SubtaskRow({
         />
         {canManage && <GripVertical className="shrink-0 cursor-grab" size={14} color="var(--muted)" />}
         <span className="min-w-0 flex-1 text-xs font-medium leading-5">
-          <FullNameTooltip text={subtask.title} className="block truncate" />
+          <TranslatableText text={subtask.title} compact className="flex w-full" textClassName="block truncate" />
           {subtask.durationDays ? <span className="mt-0.5 block text-[9px] font-normal" style={{ color: "var(--muted)" }}>{subtask.durationDays} أيام</span> : null}
           <Progress value={subtask.progress} className="mt-1" />
         </span>
         <span className="text-[10px]" style={{ color: "var(--muted)" }}>
           {subtask.completedItems}/{subtask.items.length}
         </span>
-      </button>
+      </div>
       {selected && (canManage || canWork) && (
         <div
-          className="mx-2.5 flex justify-end gap-0.5 border-t py-1.5"
+          className="mx-2.5 flex flex-wrap justify-end gap-0.5 border-t py-1.5"
           style={{
             borderColor: "color-mix(in srgb, var(--primary) 15%, transparent)",
           }}
@@ -2620,6 +3031,7 @@ function SubtaskRow({
           {subtask.manualStatus !== "IN_PROGRESS" && subtask.progress < 100 && <button type="button" className="btn h-6 gap-1 px-2 text-[10px]" disabled={busy} onClick={onStart}>{canResume ? <Play size={11} /> : null}{canResume ? "استئناف" : "بدء"}</button>}
           {(subtask.manualStatus === "IN_PROGRESS" || subtask.manualStatus === "PAUSED" || Boolean(subtask.elapsedSeconds)) && <StageTimer startedAt={subtask.startedAt} elapsedSeconds={subtask.elapsedSeconds || 0} />}
           {subtask.manualStatus === "IN_PROGRESS" && canPause && <button type="button" className="btn h-6 gap-1 px-2 text-[10px]" disabled={busy} onClick={onPause}><Pause size={11} />إيقاف مؤقت</button>}
+          {subtask.manualStatus === "IN_PROGRESS" && canPause && <button type="button" className="btn h-6 gap-1 px-2 text-[10px]" disabled={busy} onClick={onFinish}><CheckCircle2 size={11} />إنهاء</button>}
           {canManage && <><MiniButton label="تعديل التفاصيل" disabled={busy} onClick={onEdit}><Edit3 size={11} /></MiniButton><MiniButton label="حذف التفاصيل" disabled={busy} danger onClick={onDelete}><Trash2 size={11} /></MiniButton></>}
         </div>
       )}
@@ -2684,6 +3096,9 @@ function MobileSteps({
 function WorkspaceColumn({
   index,
   active,
+  expanded,
+  collapsed,
+  onToggleExpand,
   title,
   count,
   onAdd,
@@ -2692,6 +3107,9 @@ function WorkspaceColumn({
 }: {
   index: number;
   active: boolean;
+  expanded: boolean;
+  collapsed: boolean;
+  onToggleExpand: () => void;
   title: string;
   count: number;
   onAdd?: () => void;
@@ -2700,11 +3118,11 @@ function WorkspaceColumn({
 }) {
   return (
     <article
-      className={`h-[calc(100dvh-154px)] min-h-[520px] min-w-0 flex-col overflow-hidden rounded-lg border transition-colors md:h-[500px] md:min-h-0 lg:h-[540px] 2xl:h-[calc(100dvh-152px)] 2xl:min-h-[560px] ${className}`}
+      className={`project-column h-[calc(100dvh-154px)] min-h-[520px] min-w-0 flex-col overflow-hidden rounded-lg border transition-[border-color,box-shadow] md:h-[500px] md:min-h-0 lg:h-[540px] 2xl:h-[calc(100dvh-152px)] 2xl:min-h-[560px] ${expanded ? "project-column-expanded" : ""} ${collapsed ? "project-column-collapsed" : ""} ${className}`}
       style={{ borderColor: active ? "color-mix(in srgb, var(--primary) 36%, var(--border))" : "var(--border)", background: "var(--surface)", boxShadow: active ? "0 0 0 1px color-mix(in srgb, var(--primary) 8%, transparent)" : "none" }}
     >
       <header
-        className="flex h-10 shrink-0 items-center gap-0.5 border-b px-2"
+        className="project-column-header flex h-10 shrink-0 items-center gap-0.5 border-b px-2"
         style={{ borderColor: "var(--border)", background: active ? "color-mix(in srgb, var(--primary) 4%, var(--surface))" : "var(--surface)" }}
       >
         <span
@@ -2713,16 +3131,26 @@ function WorkspaceColumn({
         >
           {index}
         </span>
-        <h3 className={`min-w-0 truncate text-xs ${active ? "font-semibold" : "font-medium"}`}>{title}</h3>
+        <h3 className={`project-column-title min-w-0 truncate text-xs ${active ? "font-semibold" : "font-medium"}`}>{title}</h3>
         <span
-          className="ms-1 shrink-0 rounded-full px-1.5 py-0.5 text-[9px]"
+          className="project-column-count ms-1 shrink-0 rounded-full px-1.5 py-0.5 text-[9px]"
           style={{ color: "var(--muted)", background: "var(--surface-2)" }}
         >
           {count}
         </span>
+        <button
+          type="button"
+          className="btn-ghost ms-auto h-7 w-7 shrink-0"
+          onClick={onToggleExpand}
+          title={expanded ? `إرجاع ${title} إلى الحجم السابق` : `توسيع ${title} على كامل العرض`}
+          aria-label={expanded ? `إرجاع ${title} إلى الحجم السابق` : `توسيع ${title} على كامل العرض`}
+          aria-pressed={expanded}
+        >
+          {expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+        </button>
         {onAdd && (
           <button
-            className="btn-ghost ms-auto h-7 w-7 shrink-0"
+            className="project-column-add btn-ghost h-7 w-7 shrink-0"
             onClick={onAdd}
             aria-label={`إضافة في ${title}`}
           >
@@ -2730,7 +3158,7 @@ function WorkspaceColumn({
           </button>
         )}
       </header>
-      <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden">
+      <div className="project-column-body min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden">
         {children}
       </div>
     </article>
@@ -2829,9 +3257,16 @@ function ProjectRow({
         color: selected ? "var(--workspace-active-text)" : "var(--text)",
       }}
     >
-      <button
-        type="button"
+      <div
+        role="button"
+        tabIndex={0}
         onClick={onSelect}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            onSelect();
+          }
+        }}
         aria-pressed={selected}
         className="block w-full px-2.5 py-2 text-start outline-none transition-colors hover:bg-[var(--surface-2)] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand"
       >
@@ -2842,9 +3277,11 @@ function ProjectRow({
           />
           {canManage && <GripVertical className="shrink-0 cursor-grab" size={14} color="var(--muted)" />}
           <span className="min-w-0 flex-1">
-            <FullNameTooltip
+            <TranslatableText
               text={project.name}
-              className="block truncate text-xs font-medium"
+              compact
+              className="flex w-full"
+              textClassName="block truncate text-xs font-medium"
             />
           </span>
           {project.isPinned && <Pin size={11} fill="currentColor" style={{ color: "var(--primary)" }} />}
@@ -2868,7 +3305,7 @@ function ProjectRow({
             {project.progress}%
           </span>
         </span>
-      </button>
+      </div>
       {selected && (
         <div
           className="mx-2.5 flex items-center justify-between gap-2 border-t py-2"
@@ -2957,6 +3394,7 @@ function QuickAddInput({
   onAdd: (text: string) => Promise<void>;
 }) {
   const [text, setText] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     const value = text.trim();
@@ -2966,11 +3404,14 @@ function QuickAddInput({
       setText("");
     } catch {
       // Keep the text available so the user can correct or retry it.
+    } finally {
+      window.setTimeout(() => inputRef.current?.focus(), 0);
     }
   };
   return (
     <form onSubmit={(event) => void submit(event)} className="flex gap-1 border-b p-1.5" style={{ borderColor: "var(--border)", background: "var(--surface-2)" }}>
       <input
+        ref={inputRef}
         className="field h-7 min-w-0 flex-1 px-2 text-[10px]"
         value={text}
         onChange={(event) => setText(event.target.value)}
@@ -2987,11 +3428,16 @@ function QuickAddInput({
 
 function AddItem({ onAdd }: { onAdd: (text: string) => Promise<void> }) {
   const [text, setText] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
   const submit = async () => {
     if (!text.trim()) return;
     const value = text.trim();
-    setText("");
-    await onAdd(value);
+    try {
+      await onAdd(value);
+      setText("");
+    } finally {
+      window.setTimeout(() => inputRef.current?.focus(), 0);
+    }
   };
   return (
     <div
@@ -2999,6 +3445,7 @@ function AddItem({ onAdd }: { onAdd: (text: string) => Promise<void> }) {
       style={{ borderColor: "var(--border)", background: "var(--surface-2)" }}
     >
       <input
+        ref={inputRef}
         className="field h-7 min-w-0 flex-1 px-2 text-[10px]"
         value={text}
         onChange={(event) => setText(event.target.value)}
@@ -3024,7 +3471,6 @@ function AddItem({ onAdd }: { onAdd: (text: string) => Promise<void> }) {
 }
 
 function DeliveryPanel({
-  task,
   item,
   deliveries,
   memberMap,
@@ -3032,11 +3478,9 @@ function DeliveryPanel({
   canManage,
   currentUserId,
   busy,
-  onCancelItem,
   onDelete,
   onSubmit,
 }: {
-  task: TaskNode;
   item: ItemNode | null;
   deliveries: DeliveryNode[];
   memberMap: Map<string, Employee>;
@@ -3044,7 +3488,6 @@ function DeliveryPanel({
   canManage: boolean;
   currentUserId: string;
   busy: boolean;
-  onCancelItem: () => void;
   onDelete: (id: string) => Promise<void>;
   onSubmit: (payload: {
     text: string;
@@ -3058,6 +3501,7 @@ function DeliveryPanel({
   const [files, setFiles] = useState<File[]>([]);
   const [dragging, setDragging] = useState(false);
   const [showLink, setShowLink] = useState(false);
+  const [composerMode, setComposerMode] = useState<"text" | "files" | "audio" | "link">("text");
   const [uploadProgress, setUploadProgress] = useState(0);
   const [recording, setRecording] = useState(false);
   const [recordSeconds, setRecordSeconds] = useState(0);
@@ -3068,6 +3512,7 @@ function DeliveryPanel({
   } | null>(null);
   const [composerError, setComposerError] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordingStreamRef = useRef<MediaStream | null>(null);
   const recordingChunksRef = useRef<Blob[]>([]);
@@ -3086,12 +3531,6 @@ function DeliveryPanel({
       ),
     [deliveries],
   );
-  const attachmentCount = deliveries.reduce(
-    (sum, delivery) =>
-      sum + (delivery.attachments?.length || (delivery.link ? 1 : 0)),
-    0,
-  );
-
   useEffect(() => {
     if (!recording) return;
     const timer = window.setInterval(
@@ -3283,8 +3722,10 @@ function DeliveryPanel({
       filesRef.current = [];
       setFiles([]);
       setShowLink(false);
+      setComposerMode("text");
       setUploadProgress(0);
       clearRecordedAudio(false);
+      window.setTimeout(() => textareaRef.current?.focus(), 0);
     } catch {
       setUploadProgress(0);
     }
@@ -3293,29 +3734,7 @@ function DeliveryPanel({
   return (
     <div className="flex min-h-full flex-col">
       <div
-        className="flex items-center gap-2 border-b px-2 py-1.5"
-        style={{ borderColor: "var(--border)" }}
-      >
-        <FullNameTooltip
-          text={item?.text || "بند تنفيذ تلقائي عند الإرسال"}
-          className="min-w-0 flex-1 truncate text-xs font-medium"
-        />
-        <span
-          className={`status shrink-0 ${task.derivedStatus === "COMPLETED" ? "status-success" : task.derivedStatus === "IN_PROGRESS" ? "status-warning" : "status-neutral"}`}
-        >
-          {task.derivedStatus === "COMPLETED"
-            ? "مكتملة"
-            : task.derivedStatus === "IN_PROGRESS"
-              ? "قيد التنفيذ"
-              : "لم تبدأ"}
-        </span>
-        <span className="shrink-0 text-[9px]" style={{ color: "var(--muted)" }}>
-          {deliveries.length}/{attachmentCount}
-        </span>
-      </div>
-
-      <div
-        className="max-h-[360px] flex-1 space-y-2 overflow-y-auto p-2.5"
+        className="order-2 min-h-0 flex-1 space-y-2 overflow-y-auto p-2.5"
         aria-live="polite"
       >
         {orderedDeliveries.length ? (
@@ -3345,52 +3764,114 @@ function DeliveryPanel({
         ) : (
           <ColumnEmpty
             icon={<Send size={18} />}
-            text="لا توجد تسليمات بعد — أضف وصف الإنجاز أو اسحب ملفاتك هنا"
+            text="لا توجد تسليمات بعد"
           />
         )}
       </div>
 
       {canSubmit && (
         <div
-          className="mt-auto border-t p-2.5"
+          className="order-1 shrink-0 border-b p-2"
           style={{
             borderColor: "var(--border)",
-            background: "var(--surface-2)",
+            background: "color-mix(in srgb, var(--primary) 3%, var(--surface))",
           }}
         >
           <div
-            className="mb-1.5 flex items-center justify-between gap-2 text-[9px]"
-            style={{ color: "var(--muted)" }}
+            className="mb-2 grid grid-cols-2 gap-1 sm:grid-cols-4"
+            role="toolbar"
+            aria-label="أدوات إنشاء التسليم"
           >
-            <span className="min-w-0 truncate">
-              التسليم على:{" "}
-              <b style={{ color: "var(--primary)" }}>
-                {item?.text || "بند تنفيذ تلقائي عند الإرسال"}
-              </b>
-            </span>
-            {item && (
-              <button
-                type="button"
-                onClick={onCancelItem}
-                className="shrink-0"
-                style={{ color: "var(--danger)" }}
-              >
-                إلغاء الربط
-              </button>
-            )}
+            <button
+              type="button"
+              className={`btn h-8 min-w-0 gap-1 px-2 text-[9px] ${composerMode === "text" ? "chip-active" : ""}`}
+              onClick={() => {
+                setComposerMode("text");
+                window.setTimeout(() => textareaRef.current?.focus(), 0);
+              }}
+              aria-pressed={composerMode === "text"}
+            >
+              <MessageSquare size={13} />
+              <span className="truncate">رسالة نصية</span>
+            </button>
+            <button
+              type="button"
+              className={`btn h-8 min-w-0 gap-1 px-2 text-[9px] ${composerMode === "files" ? "chip-active" : ""}`}
+              disabled={recording}
+              onClick={() => {
+                setComposerMode("files");
+                fileInputRef.current?.click();
+              }}
+              aria-pressed={composerMode === "files"}
+            >
+              <Paperclip size={13} />
+              <span className="truncate">إرفاق مرفقات</span>
+            </button>
+            <button
+              type="button"
+              className={`btn h-8 min-w-0 gap-1 px-2 text-[9px] ${composerMode === "audio" || recording || recordedAudio ? "chip-active" : ""}`}
+              onClick={() => {
+                setComposerMode("audio");
+                recording ? stopRecording() : void startRecording();
+              }}
+              aria-pressed={composerMode === "audio" || recording || Boolean(recordedAudio)}
+              style={recording ? { color: "var(--danger)", background: "var(--danger-soft)" } : undefined}
+            >
+              {recording ? <CircleStop size={13} /> : <Mic size={13} />}
+              <span className="truncate">{recording ? "إيقاف التسجيل" : "تسجيل صوتي"}</span>
+            </button>
+            <button
+              type="button"
+              className={`btn h-8 min-w-0 gap-1 px-2 text-[9px] ${composerMode === "link" || showLink ? "chip-active" : ""}`}
+              disabled={recording}
+              onClick={() => {
+                setShowLink((current) => {
+                  setComposerMode(current ? "text" : "link");
+                  return !current;
+                });
+              }}
+              aria-pressed={showLink}
+            >
+              <Link2 size={13} />
+              <span className="truncate">رابط</span>
+            </button>
           </div>
-          {!item && <p className="mb-1.5 text-[9px]" style={{ color: "var(--muted)" }}>سيُنشئ النظام بند تنفيذ تلقائياً ومرقماً عند إرسال هذا التسليم.</p>}
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            className="hidden"
+            accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.zip,.rar,.7z"
+            onChange={(event) => {
+              addFiles(Array.from(event.target.files || []));
+              event.currentTarget.value = "";
+            }}
+          />
           <textarea
-            className="field min-h-[64px] resize-none py-2 text-xs"
+            ref={textareaRef}
+            className="field min-h-[72px] resize-none rounded-xl border-0 py-2.5 text-xs shadow-sm ring-1 ring-[var(--border)] focus:ring-2 focus:ring-[var(--primary)]"
             value={text}
             onChange={(event) => setText(event.target.value)}
+            onFocus={() => setComposerMode("text")}
+            onKeyDown={(event) => {
+              if (
+                event.key === "Enter" &&
+                !event.shiftKey &&
+                !event.nativeEvent.isComposing
+              ) {
+                event.preventDefault();
+                if (!busy && !recording) void submit();
+              }
+            }}
             onPaste={(event) => {
               const pasted = Array.from(event.clipboardData.files);
               if (pasted.length) addFiles(pasted);
             }}
+            placeholder="اكتب رسالة أو تفاصيل التسليم…"
             aria-label="وصف الإنجاز أو ملاحظات التسليم"
           />
 
+          {(composerMode === "files" || composerMode === "audio" || recording || recordedAudio || files.length > 0) && (
           <div
             onDragEnter={(event) => {
               event.preventDefault();
@@ -3412,92 +3893,19 @@ function DeliveryPanel({
               background: dragging ? "var(--primary-soft)" : "var(--surface)",
             }}
           >
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              className="hidden"
-              accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.zip,.rar,.7z"
-              onChange={(event) => {
-                addFiles(Array.from(event.target.files || []));
-                event.currentTarget.value = "";
+            {composerMode === "files" && <button
+              type="button"
+              className="flex w-full items-center justify-center gap-1.5 py-1 text-[8px]"
+              style={{ color: "var(--muted)" }}
+              disabled={recording}
+              onClick={() => {
+                setComposerMode("files");
+                fileInputRef.current?.click();
               }}
-            />
-            <div
-              className="flex flex-wrap items-center gap-1"
-              role="toolbar"
-              aria-label="خيارات إرفاق التسليم"
             >
-              <button
-                type="button"
-                className="btn-ghost h-8 w-8 p-0"
-                disabled={recording}
-                onClick={() => fileInputRef.current?.click()}
-                title="إرفاق ملفات"
-                aria-label="إرفاق ملفات"
-              >
-                <Paperclip size={15} />
-              </button>
-              <button
-                type="button"
-                className="btn-ghost relative h-8 w-8 p-0"
-                onClick={() =>
-                  recording ? stopRecording() : void startRecording()
-                }
-                style={{
-                  color: recording
-                    ? "var(--danger)"
-                    : recordedAudio
-                      ? "var(--primary)"
-                      : undefined,
-                  background: recording
-                    ? "var(--danger-soft)"
-                    : recordedAudio
-                      ? "var(--primary-soft)"
-                      : undefined,
-                }}
-                title={
-                  recording
-                    ? "إيقاف التسجيل"
-                    : recordedAudio
-                      ? "إعادة التسجيل الصوتي"
-                      : "تسجيل صوتي"
-                }
-                aria-label={
-                  recording
-                    ? `إيقاف التسجيل بعد ${formatDuration(recordSeconds)}`
-                    : recordedAudio
-                      ? "إعادة التسجيل الصوتي"
-                      : "تسجيل صوتي"
-                }
-              >
-                {recording ? <CircleStop size={15} /> : <Mic size={15} />}
-                {recording && (
-                  <span className="absolute end-0.5 top-0.5 h-1.5 w-1.5 animate-pulse rounded-full bg-red-500" />
-                )}
-              </button>
-              <button
-                type="button"
-                className="btn-ghost h-8 w-8 p-0"
-                disabled={recording}
-                onClick={() => setShowLink((value) => !value)}
-                style={{
-                  color: showLink ? "var(--primary)" : undefined,
-                  background: showLink ? "var(--primary-soft)" : undefined,
-                }}
-                title="إضافة رابط"
-                aria-label={showLink ? "إخفاء حقل الرابط" : "إضافة رابط"}
-                aria-pressed={showLink}
-              >
-                <Link2 size={15} />
-              </button>
-              <span
-                className="ms-auto text-[8px]"
-                style={{ color: "var(--muted)" }}
-              >
-                اسحب وأفلت · 6 ملفات · 50MB للملف
-              </span>
-            </div>
+              <Paperclip size={12} />
+              اسحب وأفلت هنا أو اضغط للاختيار · 6 ملفات · 50MB للملف
+            </button>}
             {recording && (
               <div
                 className="mt-2 flex items-center gap-2 rounded-lg border px-2 py-2"
@@ -3627,6 +4035,7 @@ function DeliveryPanel({
               </div>
             )}
           </div>
+          )}
           {showLink && (
             <div className="relative mt-1.5">
               <Link2
@@ -3740,21 +4149,22 @@ function DeliveryCard({
           </div>
           {delivery.itemId && (
             <span
-              className="mt-0.5 inline-block max-w-full rounded px-1.5 py-0.5 text-[8px]"
+              className="mt-0.5 inline-flex max-w-full rounded px-1.5 py-0.5 text-[8px]"
               style={{ background: "var(--primary-soft)", color: "var(--primary)" }}
             >
-              <FullNameTooltip text={itemName || "بند تنفيذ"} className="block max-w-full truncate" />
+              <TranslatableText text={itemName || "بند تنفيذ"} compact className="flex max-w-full" textClassName="truncate" />
             </span>
           )}
         </div>
       </div>
       {delivery.text && (
-        <p
-          className="mt-1.5 whitespace-pre-wrap break-words text-[10px] leading-5"
-          style={{ color: "var(--text)" }}
-        >
-          {delivery.text}
-        </p>
+        <TranslatableText
+          text={delivery.text}
+          compact
+          multiline
+          className="mt-1.5 w-full items-start text-[10px] leading-5"
+          textClassName="whitespace-pre-wrap break-words"
+        />
       )}
       {delivery.attachments?.length ? (
         <div className="mt-1.5 grid gap-1.5">
@@ -3970,7 +4380,18 @@ function formatBytes(bytes: number) {
   return `${(bytes / 1024 ** index).toFixed(index ? 1 : 0)} ${units[index]}`;
 }
 function formatDuration(seconds: number) {
-  return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+  const totalSeconds = Math.max(0, Math.floor(Number(seconds) || 0));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const remainingSeconds = totalSeconds % 60;
+  const parts: string[] = [];
+  if (hours > 0) parts.push(`${hours} س`);
+  if (minutes > 0 || hours > 0)
+    parts.push(`${hours > 0 ? String(minutes).padStart(2, "0") : minutes} د`);
+  parts.push(
+    `${minutes > 0 || hours > 0 ? String(remainingSeconds).padStart(2, "0") : remainingSeconds} ث`,
+  );
+  return parts.join(" ");
 }
 
 function ProjectModal({
